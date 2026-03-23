@@ -8,5 +8,7 @@ def packages():
 
     packages = get_packages()
 
-    # only return first 50 rows
+    if not isinstance(packages, list):
+        packages = packages.get("data", [])
+    
     return packages[:50]
