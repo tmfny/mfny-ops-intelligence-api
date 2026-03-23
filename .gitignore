@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment variables
+.env
+
+# MacOS
+.DS_Store
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Build / temp
+*.sqlite3
+*.db
+
+# Streamlit (if used locally)
+.streamlit/
+
+# Misc
+*.csv
+*.xlsx
