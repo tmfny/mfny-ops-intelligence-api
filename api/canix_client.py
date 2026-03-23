@@ -8,8 +8,10 @@ CANIX_BASE = "https://api.canix.com/api/v1"
 
 API_KEY = os.getenv("CANIX_API_KEY")
 
+print("CANIX KEY LOADED:", API_KEY)  # ← ADD THIS LINE
+
 headers = {
-    "X-API-KEY": API_KEY,
+    "x-api-key": API_KEY,
     "Content-Type": "application/json"
 }
 
