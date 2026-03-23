@@ -8,7 +8,7 @@ def packages():
 
     packages = get_packages()
 
-    if not isinstance(packages, list):
-        packages = packages.get("data", [])
+    print("RAW PACKAGES TYPE:", type(packages))
+    print("RAW PACKAGES SAMPLE:", str(packages)[:500])
     
     return packages[:50]
