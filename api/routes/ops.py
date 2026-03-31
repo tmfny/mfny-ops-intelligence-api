@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from api.canix_client import get_runs, get_batches, get_packages
 from api.constants import ACTIVE_STATUSES, APPROVAL_STATUSES, COMPLETED_STATUSES
 import time
+import concurrent.futures
 from datetime import datetime, timezone
 from api.ops_model import (
     build_production_model,
@@ -15,56 +16,134 @@ from api.ops_model import (
     get_next_actions
 )
 
-OPS_CACHE = {
+RUNS_BATCHES_CACHE = {
     "runs": None,
     "batches": None,
-    "packages": None,
     "batch_map": None,
     "last_refresh": 0
 }
 
-CACHE_TTL = 60  # seconds
+PACKAGES_CACHE = {
+    "packages": None,
+    "last_refresh": 0
+}
+
+RUNS_BATCHES_TTL = 60  # 1 minute
+PACKAGES_TTL = 300  # 5 minutes
 
 router = APIRouter()
 
-def load_ops_data():
+def log_timing(name, start):
+    print(f"{name} took {round(time.time() - start, 2)}s")
+
+def load_runs_batches():
 
     now = time.time()
 
     if (
-        OPS_CACHE["runs"] is None or
-        OPS_CACHE["batches"] is None or
-        now - OPS_CACHE["last_refresh"] > CACHE_TTL
+        RUNS_BATCHES_CACHE["runs"] is None or
+        RUNS_BATCHES_CACHE["batches"] is None or
+        now - RUNS_BATCHES_CACHE["last_refresh"] > RUNS_BATCHES_TTL
     ):
 
-        runs = get_runs()
-        batches = get_batches()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            runs_future = executor.submit(get_runs)
+            batches_future = executor.submit(get_batches)
 
-        # only refresh packages occasionally
-        if OPS_CACHE["packages"] is None or now - OPS_CACHE["last_refresh"] > 300:
-            OPS_CACHE["packages"] = get_packages()
+            try:
+                runs = runs_future.result(timeout=15)
+            except:
+                runs = []
+            try:
+                batches = batches_future.result(timeout=15)
+            except:
+                batches = []
 
-        packages = OPS_CACHE["packages"]
+        runs = runs[:1000] if runs else []
 
-        batch_map = {b["id"]: b for b in batches}
+        batch_map = {b.get("id"): b for b in batches if b.get("id")}
 
-        OPS_CACHE["runs"] = runs
-        OPS_CACHE["batches"] = batches
-        OPS_CACHE["packages"] = packages
-        OPS_CACHE["batch_map"] = batch_map
-        OPS_CACHE["last_refresh"] = now
+        RUNS_BATCHES_CACHE["runs"] = runs
+        RUNS_BATCHES_CACHE["batches"] = batches
+        RUNS_BATCHES_CACHE["batch_map"] = batch_map
+        RUNS_BATCHES_CACHE["last_refresh"] = now
 
     return (
-        OPS_CACHE["runs"],
-        OPS_CACHE["batches"],
-        OPS_CACHE["batch_map"],
-        OPS_CACHE["packages"]
+        RUNS_BATCHES_CACHE["runs"],
+        RUNS_BATCHES_CACHE["batches"],
+        RUNS_BATCHES_CACHE["batch_map"]
     )
+
+
+def load_packages():
+
+    now = time.time()
+
+    if (
+        PACKAGES_CACHE["packages"] is None or
+        now - PACKAGES_CACHE["last_refresh"] > PACKAGES_TTL
+    ):
+        PACKAGES_CACHE["packages"] = get_packages()
+        PACKAGES_CACHE["last_refresh"] = now
+
+    return PACKAGES_CACHE["packages"]
+
+
+def load_ops_data_full():
+    runs, batches, batch_map = load_runs_batches()
+    packages = load_packages()
+    return runs, batches, batch_map, packages
+
+def build_material_pressure(runs, batch_map):
+
+    pressures = []
+
+    for run in runs:
+
+        if not isinstance(run, dict):
+            continue
+
+        status = run.get("status")
+
+        if status not in ACTIVE_STATUSES and status not in APPROVAL_STATUSES:
+            continue
+
+        cannabis_inputs = run.get("cannabis_inputs", [])
+        cannabis_outputs = run.get("cannabis_outputs", [])
+
+        batch = batch_map.get(run.get("manufacturing_batch_id"), {})
+
+        input_qty = sum(i.get("quantity", 0) for i in cannabis_inputs)
+        output_qty = sum(o.get("quantity", 0) for o in cannabis_outputs)
+
+        if input_qty == 0:
+            pressure = "NO_INPUTS"
+        elif input_qty > 0 and output_qty == 0 and status == "OPEN":
+            pressure = "READY_NOT_STARTED"
+        elif input_qty > 0 and output_qty == 0:
+            pressure = "IN_PROGRESS"
+        elif input_qty > 0 and output_qty > 0 and status != "SUBMITTED":
+            pressure = "AWAITING_COMPLETION"
+        else:
+            continue
+
+        pressures.append({
+            "batch_name": batch.get("name"),
+            "run_name": run.get("name"),
+            "status": status,
+            "input_quantity": round(input_qty, 2),
+            "output_quantity": round(output_qty, 2),
+            "pressure": pressure
+        })
+
+    return pressures
 
 @router.get("/ops/active_runs")
 def active_runs():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    start = time.time()
+
+    runs, batches, batch_map = load_runs_batches()
 
     active = []
 
@@ -83,12 +162,15 @@ def active_runs():
                 "created_at": run.get("created_at")
             })
 
+    log_timing("/ops/active_runs", start)
     return active
 
 @router.get("/ops/approval_queue")
 def approval_queue():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    start = time.time()
+
+    runs, batches, batch_map = load_runs_batches()
 
     queue = []
 
@@ -110,12 +192,13 @@ def approval_queue():
                 "created_at": run.get("created_at")
             })
 
+    log_timing("/ops/approval_queue", start)
     return queue
 
 @router.get("/ops/production_graph")
 def production_graph():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     batches_grouped = {}
 
@@ -163,7 +246,7 @@ def production_graph():
 @router.get("/ops/batch_progress")
 def batch_progress():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     batches_grouped = {}
 
@@ -229,7 +312,7 @@ def batch_progress():
 @router.get("/ops/bottlenecks")
 def bottlenecks():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     model = build_production_model(runs, batches)
 
@@ -238,7 +321,7 @@ def bottlenecks():
 @router.get("/ops/blockers")
 def blockers():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     blocked = []
 
@@ -283,7 +366,7 @@ PACKAGING_KEYWORDS = ["pack", "box", "label", "tube"]
 @router.get("/ops/packaging_queue")
 def packaging_queue():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     queue = []
 
@@ -321,7 +404,7 @@ def packaging_queue():
 @router.get("/ops/run_timeline")
 def run_timeline():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     timeline = []
 
@@ -360,14 +443,14 @@ def run_timeline():
 @router.get("/ops/yield_analysis")
 def yield_analysis():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     return calculate_yields(runs)
 
 @router.get("/ops/inventory_risk")
 def inventory_risk():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     risks = []
 
@@ -430,7 +513,9 @@ def inventory_risk():
 @router.get("/ops/inventory_health")
 def inventory_health():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    start = time.time()
+
+    runs, batches, batch_map, packages = load_ops_data_full()
 
     total_packages = 0
     total_quantity = 0
@@ -462,6 +547,7 @@ def inventory_health():
         if not is_active:
             inactive_packages += 1
 
+    log_timing("/ops/inventory_health", start)
     return {
         "packages": total_packages,
         "total_quantity": round(total_quantity, 2),
@@ -473,7 +559,7 @@ def inventory_health():
 @router.get("/ops/production_dag")
 def production_dag():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     model = build_production_model(runs, batches)
 
@@ -484,7 +570,7 @@ def production_dag():
 @router.get("/ops/stalled_batches")
 def stalled_batches():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     model = build_production_model(runs, batches)
 
@@ -493,14 +579,14 @@ def stalled_batches():
 @router.get("/ops/next_actions")
 def next_actions():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     return get_next_actions(runs, batch_map)
 
 @router.get("/ops/throughput")
 def throughput():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     model = build_production_model(runs, batches)
 
@@ -509,75 +595,28 @@ def throughput():
 @router.get("/ops/batch_eta")
 def batch_eta():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    start = time.time()
+
+    runs, batches, batch_map = load_runs_batches()
 
     model = build_production_model(runs, batches)
 
+    log_timing("/ops/batch_eta", start)
     return estimate_batch_eta(model)
 
 @router.get("/ops/material_flow")
 def material_flow_endpoint():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     return material_flow(runs)
 
 @router.get("/ops/material_pressure")
 def material_pressure():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
-    pressures = []
-
-    for run in runs:
-
-        if not isinstance(run, dict):
-            continue
-
-        status = run.get("status")
-
-        if status not in ACTIVE_STATUSES and status not in APPROVAL_STATUSES:
-            continue
-
-        cannabis_inputs = run.get("cannabis_inputs", [])
-        cannabis_outputs = run.get("cannabis_outputs", [])
-
-        batch = batch_map.get(run.get("manufacturing_batch_id"), {})
-
-        input_qty = sum(i.get("quantity", 0) for i in cannabis_inputs)
-        output_qty = sum(o.get("quantity", 0) for o in cannabis_outputs)
-
-        # � 1. No material attached
-        if input_qty == 0:
-            pressure = "NO_INPUTS"
-
-        # � 2. Material attached but nothing started
-        elif input_qty > 0 and output_qty == 0 and status == "OPEN":
-            pressure = "READY_NOT_STARTED"
-
-        # � 3. Material in process (good, but still pressure)
-        elif input_qty > 0 and output_qty == 0:
-            pressure = "IN_PROGRESS"
-
-        # � 4. Output exists but not finalized
-        elif input_qty > 0 and output_qty > 0 and status != "SUBMITTED":
-            pressure = "AWAITING_COMPLETION"
-
-        else:
-            continue
-
-        pressures.append({
-            "batch_name": batch.get("name"),
-            "run_name": run.get("name"),
-            "status": status,
-
-            "input_quantity": round(input_qty, 2),
-            "output_quantity": round(output_qty, 2),
-
-            "pressure": pressure
-        })
-
-    return pressures
+    return build_material_pressure(runs, batch_map)
 
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
@@ -585,7 +624,7 @@ from datetime import datetime, timezone, timedelta
 @router.get("/ops/production_velocity")
 def production_velocity():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    runs, batches, batch_map = load_runs_batches()
 
     now = datetime.now(timezone.utc)
     last_week = now - timedelta(days=7)
@@ -649,7 +688,9 @@ def production_velocity():
 @router.get("/ops/system_context")
 def system_context():
 
-    runs, batches, batch_map, packages = load_ops_data()
+    start = time.time()
+
+    runs, batches, batch_map = load_runs_batches()
 
     model = build_production_model(runs, batches)
 
@@ -657,7 +698,7 @@ def system_context():
     stalled = find_stalled_batches(model)
     blockers_list = []  # optional: reuse blockers() if needed
 
-    pressure = material_pressure()
+    pressure = build_material_pressure(runs, batch_map)
     actions = get_next_actions(runs, batch_map)
 
     from collections import Counter
@@ -694,6 +735,8 @@ def system_context():
     if bottlenecks and bottlenecks[0]["runs_waiting"] > 10:
         alerts.append(f"Bottleneck at {bottlenecks[0]['step']}")
 
+
+    log_timing("/ops/system_context", start)
     return {
         "summary": summary,
         "system_state": system_state,
@@ -703,3 +746,25 @@ def system_context():
         "next_actions": actions[:10],
         "alerts": alerts
     }
+
+@router.get("/ops/overview")
+def overview():
+
+    start = time.time()
+
+    runs, batches, batch_map = load_runs_batches()
+
+    active = sum(1 for r in runs if r.get("status") in ACTIVE_STATUSES)
+    approval = sum(1 for r in runs if r.get("status") in APPROVAL_STATUSES)
+    completed = sum(1 for r in runs if r.get("status") in COMPLETED_STATUSES)
+
+    result = {
+        "total_runs": len(runs),
+        "active_runs": active,
+        "approval_queue": approval,
+        "completed_runs": completed,
+        "total_batches": len(batches)
+    }
+
+    log_timing("/ops/overview", start)
+    return result

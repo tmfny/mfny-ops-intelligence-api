@@ -8,7 +8,11 @@ def packages():
 
     packages = get_packages()
 
-    print("RAW PACKAGES TYPE:", type(packages))
-    print("RAW PACKAGES SAMPLE:", str(packages)[:500])
-    
+    # prevent crash on error
+    if isinstance(packages, dict) and "error" in packages:
+        return packages
+
+    if not isinstance(packages, list):
+        packages = packages.get("data", []) or packages.get("results", []) or []
+
     return packages[:50]
