@@ -854,11 +854,7 @@ threading.Thread(target=background_refresh, daemon=True).start()
 
 @router.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "runs_cached": RUNS_BATCHES_CACHE["runs"] is not None,
-        "packages_cached": PACKAGES_CACHE["packages"] is not None
-    }
+    return {"status": "ok",}
 
 # ADD this function right after the background_refresh function
 
