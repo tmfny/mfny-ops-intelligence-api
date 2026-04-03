@@ -1,3 +1,5 @@
+import threading
+cache_lock = threading.Lock()
 from fastapi import APIRouter
 from api.canix_client import get_runs, get_batches, get_packages
 from api.constants import ACTIVE_STATUSES, APPROVAL_STATUSES, COMPLETED_STATUSES
@@ -28,7 +30,7 @@ PACKAGES_CACHE = {
     "last_refresh": 0
 }
 
-RUNS_BATCHES_TTL = 60  # 1 minute
+RUNS_BATCHES_TTL = 3000  # 1 minute
 PACKAGES_TTL = 300  # 5 minutes
 
 router = APIRouter()
@@ -40,39 +42,73 @@ def load_runs_batches():
 
     now = time.time()
 
+    # ✅ CACHE HIT
     if (
-        RUNS_BATCHES_CACHE["runs"] is None or
-        RUNS_BATCHES_CACHE["batches"] is None or
-        now - RUNS_BATCHES_CACHE["last_refresh"] > RUNS_BATCHES_TTL
+        RUNS_BATCHES_CACHE["runs"] is not None and
+        RUNS_BATCHES_CACHE["batches"] is not None and
+        now - RUNS_BATCHES_CACHE["last_refresh"] <= RUNS_BATCHES_TTL
     ):
+        print("Using cached runs/batches")
+        return (
+            RUNS_BATCHES_CACHE["runs"],
+            RUNS_BATCHES_CACHE["batches"],
+            RUNS_BATCHES_CACHE["batch_map"]
+        )
+    
+    if (
+        RUNS_BATCHES_CACHE["runs"] is not None and
+        RUNS_BATCHES_CACHE["batches"] is not None
+    ):
+        print("serving stale cache for runs/batches")
+        return (
+            RUNS_BATCHES_CACHE["runs"],
+            RUNS_BATCHES_CACHE["batches"],
+            RUNS_BATCHES_CACHE["batch_map"]
+        )
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            runs_future = executor.submit(get_runs)
-            batches_future = executor.submit(get_batches)
+    # ✅ CACHE MISS → fetch
+    print("Fetching fresh runs/batches...")
 
-            try:
-                runs = runs_future.result(timeout=15)
-            except:
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        runs_future = executor.submit(get_runs)
+        batches_future = executor.submit(get_batches)
+
+        try:
+            runs = runs_future.result()
+        except Exception as e:
+            print("Failed to fetch runs:", repr(e))
+            from api.canix_client import CACHE
+            if "/manu_batch_runs" in CACHE:
+                runs, _ = CACHE["/manu_batch_runs"]
+                print(f"Recovered {len(runs)} runs from canix cache")
+            else:
                 runs = []
-            try:
-                batches = batches_future.result(timeout=15)
-            except:
-                batches = []
 
-        runs = runs[:1000] if runs else []
+        try:
+            batches = batches_future.result(timeout=60)
+        except Exception as e:
+            print("Failed to fetch batches:", repr(e))
+            batches = []
 
-        batch_map = {b.get("id"): b for b in batches if b.get("id")}
+    if isinstance(runs, list):
+        runs = runs[:1000]
+    else:
+        print("Ruins fetch returned unexpected type:", type(runs), runs)
+        runs = []
 
+    batch_map = {b.get("id"): b for b in batches if b.get("id")}
+
+    with cache_lock:
         RUNS_BATCHES_CACHE["runs"] = runs
         RUNS_BATCHES_CACHE["batches"] = batches
         RUNS_BATCHES_CACHE["batch_map"] = batch_map
         RUNS_BATCHES_CACHE["last_refresh"] = now
 
-    return (
-        RUNS_BATCHES_CACHE["runs"],
-        RUNS_BATCHES_CACHE["batches"],
-        RUNS_BATCHES_CACHE["batch_map"]
-    )
+        return (
+            RUNS_BATCHES_CACHE["runs"],
+            RUNS_BATCHES_CACHE["batches"],
+            RUNS_BATCHES_CACHE["batch_map"]
+        )
 
 
 def load_packages():
@@ -80,13 +116,26 @@ def load_packages():
     now = time.time()
 
     if (
-        PACKAGES_CACHE["packages"] is None or
-        now - PACKAGES_CACHE["last_refresh"] > PACKAGES_TTL
+        PACKAGES_CACHE["packages"] is not None and
+        now - PACKAGES_CACHE["last_refresh"] <= PACKAGES_TTL
     ):
-        PACKAGES_CACHE["packages"] = get_packages()
+        print("Using cached packages")
+        with cache_lock:
+            return PACKAGES_CACHE["packages"]
+        
+    print("Fetching fresh packages...")
+
+    try:
+        packages = get_packages()
+    except Exception as e:
+        print("Failed to fetch packages:", e)
+        packages = []
+
+    with cache_lock:
+        PACKAGES_CACHE["packages"] = packages
         PACKAGES_CACHE["last_refresh"] = now
 
-    return PACKAGES_CACHE["packages"]
+        return PACKAGES_CACHE["packages"]
 
 
 def load_ops_data_full():
@@ -754,6 +803,15 @@ def overview():
 
     runs, batches, batch_map = load_runs_batches()
 
+    if not runs:
+        return {
+            "total_runs": 0,
+            "active_runs": 0,
+            "approval_queue": 0,
+            "completed_runs": 0,
+            "total_batches": len(batches) if batches else 0
+        }
+
     active = sum(1 for r in runs if r.get("status") in ACTIVE_STATUSES)
     approval = sum(1 for r in runs if r.get("status") in APPROVAL_STATUSES)
     completed = sum(1 for r in runs if r.get("status") in COMPLETED_STATUSES)
@@ -768,3 +826,49 @@ def overview():
 
     log_timing("/ops/overview", start)
     return result
+
+import threading
+
+def warm_cache():
+    try:
+        print("Warming cache...")
+        load_runs_batches()
+        load_packages()
+        print("Cache warmed")
+    except Exception as e:
+        print("Cache warm failed:", e)
+
+threading.Thread(target=warm_cache, daemon=True).start()
+
+def background_refresh():
+    while True:
+        time.sleep(240)
+        try:
+            load_runs_batches()
+            load_packages()
+            print("Backgrouund cache refreshed")
+        except Exception as e:
+            print("Background refresh failed:", e)
+
+threading.Thread(target=background_refresh, daemon=True).start()
+
+@router.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "runs_cached": RUNS_BATCHES_CACHE["runs"] is not None,
+        "packages_cached": PACKAGES_CACHE["packages"] is not None
+    }
+
+# ADD this function right after the background_refresh function
+
+def keep_alive_ping():
+    while True:
+        time.sleep(270)  # every 4.5 minutes
+        try:
+            requests.get("https://web-production-a1b2b.up.railway.app/health", timeout=10)
+            print("Keep-alive ping sent")
+        except Exception as e:
+            print("Keep-alive failed:", e)
+
+threading.Thread(target=keep_alive_ping, daemon=True).start()
