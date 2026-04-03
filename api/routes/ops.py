@@ -863,10 +863,11 @@ def health():
 # ADD this function right after the background_refresh function
 
 def keep_alive_ping():
+    import requests as req
     while True:
         time.sleep(270)  # every 4.5 minutes
         try:
-            requests.get("https://web-production-a1b2b.up.railway.app/health", timeout=10)
+            req.get("https://web-production-a1b2b.up.railway.app/health", timeout=10)
             print("Keep-alive ping sent")
         except Exception as e:
             print("Keep-alive failed:", e)
