@@ -79,5 +79,53 @@ def get_batches():
     return fetch_all("/manu_batches")
 
 
-def get_runs(limit=200):
-    return fetch_all("/manu_batch_runs", limit)
+def get_runs():
+    print("🚨 get_runs() CALLED 🚨")
+
+    all_runs = []
+    page = 1
+    limit = 100
+
+    while True:
+        print(f"🚨 Fetching page {page} 🚨")
+
+        url = f"{CANIX_BASE}/manu_batch_runs"
+
+        params = {
+            "page": page,
+            "limit": limit
+        }
+
+        res = requests.get(url, headers=headers, params=params)
+
+        print("STATUS:", res.status_code)
+        print("TEXT PREVIEW:", res.text[:500])
+
+        if res.status_code != 200:
+            print("[get_runs] ERROR:", res.status_code, res.text)
+            break
+
+        json_data = res.json()
+
+        if isinstance(json_data, dict) and "data" in json_data:
+            data = json_data["data"]
+        elif isinstance(json_data, list):
+            data = json_data
+        else:
+            print("[get_runs] Unexpected format:", json_data)
+            break
+        
+        if not data:
+            print("[get_runs] No more data")
+            break
+
+        all_runs.extend(data)
+
+        if len(data) < limit:
+            break
+
+        page += 1
+
+    print(f"[get_runs] Total runs fetched: {len(all_runs)}")
+    return all_runs
+

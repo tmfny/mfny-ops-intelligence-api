@@ -119,7 +119,9 @@ def load_runs_batches():
             print("Failed to fetch batches:", repr(e))
             batches = []
 
-    MAX_RUNS = 2000
+    print(f"Total runs fetched BEFORE trim: {len(runs) if isinstance(runs, list) else 0}")
+
+    MAX_RUNS = 3000
 
     if isinstance(runs, list):
         if len(runs) > MAX_RUNS:
@@ -195,17 +197,26 @@ def build_material_pressure(runs, batch_map):
 
         batch = batch_map.get(run.get("manufacturing_batch_id"), {})
 
+        has_defined_inputs = len(cannabis_inputs) > 0
+
         input_qty = sum(float(i.get("quantity") or 0) for i in cannabis_inputs)
         output_qty = sum(float(o.get("quantity") or 0) for o in cannabis_outputs)
 
-        if input_qty == 0:
-            pressure = "NO_INPUTS"
+        if not has_defined_inputs:
+            pressure = "NO_INPUT_DEFINITION"
+
+        elif has_defined_inputs and input_qty == 0:
+            pressure = "CONFIGURATION_REQUIRED"
+
         elif input_qty > 0 and output_qty == 0 and status == "OPEN":
             pressure = "READY_NOT_STARTED"
+
         elif input_qty > 0 and output_qty == 0:
             pressure = "IN_PROGRESS"
+
         elif input_qty > 0 and output_qty > 0 and status != "SUBMITTED":
             pressure = "AWAITING_COMPLETION"
+
         else:
             continue
 
@@ -849,36 +860,19 @@ def overview():
         "last_updated": now_iso()
     }
 
-def warm_cache():
-    try:
-        print("Warming cache...")
-        load_runs_batches()
-        load_packages()
-        print("Cache warmed")
-    except Exception as e:
-        print("Cache warm failed:", e)
-
-if "bg_thread_started" not in globals():
-    bg_thread_started = True
-    threading.Thread(target=warm_cache, daemon=True).start()
-
-def background_refresh():
-    while True:
-        time.sleep(240)
-        try:
-            load_runs_batches()
-            load_packages()
-            print("Background cache refreshed")
-        except Exception as e:
-            print("Background refresh failed:", e)
-
-if "bg_refresh_thread_started" not in globals():
-    bg_refresh_thread_started = True
-    threading.Thread(target=background_refresh, daemon=True).start()
-
 @router.get("/health")
 def health():
     return {"status": "ok",}
+
+@router.get("/ops/debug/source")
+def debug_source():
+    import inspect
+    from api.canix_client import get_runs
+
+    return {
+        "file": inspect.getfile(get_runs),
+        "code": inspect.getsource(get_runs)[:500]
+    }
 
 @router.get("/ops/debug/cache")
 def cache_status():
@@ -886,4 +880,23 @@ def cache_status():
         "runs_batches_last_refresh": RUNS_BATCHES_CACHE["last_refresh"],
         "packages_last_refresh": PACKAGES_CACHE["last_refresh"],
         "model_last_refresh": MODEL_CACHE["last_refresh"]
+    }
+
+@router.get("/ops/debug/raw")
+def debug_raw():
+    runs, batches, batch_map = load_runs_batches()
+    return {
+        "runs_count": len(runs),
+        "batches_count": len(batches),
+        "sample_run": runs[0] if runs else None
+    }
+
+@router.get("/ops/debug/runs_raw")
+def debug_runs_raw():
+    from api.canix_client import get_runs
+    runs = get_runs()
+    return {
+        "type": str(type(runs)),
+        "length": len(runs) if isinstance(runs, list) else None,
+        "preview": runs[:1] if isinstance(runs, list) and runs else runs
     }
