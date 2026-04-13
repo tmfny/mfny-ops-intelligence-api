@@ -4,8 +4,7 @@ import subprocess
 import time
 import os
 
-API = "http://127.0.0.1:8000"
-
+API = "https://web-production-a1b2b.up.railway.app"
 PROJECT_PATH = "/Users/tmiles/Desktop/mfny_ops_platform"
 
 def ensure_api_running():
@@ -21,23 +20,31 @@ def ensure_api_running():
         time.sleep(3)
 
 ensure_api_running()
-
 mcp = FastMCP("mfny_ops")
 
 @mcp.tool()
 def active_runs():
     """Return currently active manufacturing runs."""
-    return requests.get(f"{API}/ops/active_runs").json()
+    try:
+        return requests.get(f"{API}/ops/active_runs", timeout=90).json()
+    except Exception as e:
+        return {"error": str(e), "status": "timeout_or_unavailable"}
 
 @mcp.tool()
 def batch_progress():
     """Return batch workflow progress."""
-    return requests.get(f"{API}/ops/batch_progress").json()
+    try:
+        return requests.get(f"{API}/ops/batch_progress", timeout=90).json()
+    except Exception as e:
+        return {"error": str(e), "status": "timeout_or_unavailable"}
 
 @mcp.tool()
 def ops_overview():
     """Return facility overview metrics."""
-    return requests.get(f"{API}/ops/overview").json()
+    try:
+        return requests.get(f"{API}/ops/overview", timeout=90).json()
+    except Exception as e:
+        return {"error": str(e), "status": "timeout_or_unavailable"}
 
 if __name__ == "__main__":
     mcp.run()
@@ -45,14 +52,23 @@ if __name__ == "__main__":
 @mcp.tool()
 def production_dag():
     """Return production workflow graph for all batches."""
-    return requests.get(f"{API}/ops/production_dag").json()
+    try:
+        return requests.get(f"{API}/ops/production_dag", timeout=90).json()
+    except Exception as e:
+        return {"error": str(e), "status": "timeout_or_unavailable"}
 
 @mcp.tool()
 def next_actions():
     """Return prioritized recommended next actions for operations."""
-    return requests.get(f"{API}/ops/next_actions").json()
+    try:
+        return requests.get(f"{API}/ops/next_actions", timeout=90).json()
+    except Exception as e:
+        return {"error": str(e), "status": "timeout_or_unavailable"}
 
 @mcp.tool()
 def inventory_risk():
     """Return runs that may stall due to missing inventory."""
-    return requests.get(f"{API}/ops/inventory_risk").json()
+    try:
+        return requests.get(f"{API}/ops/inventory_risk", timeout=90).json()
+    except Exception as e:
+        return {"error": str(e), "status": "timeout_or_unavailable"}
