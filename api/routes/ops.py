@@ -18,6 +18,16 @@ from api.ops_model import (
     get_next_actions
 )
 
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+MODEL_CACHE = {
+    "model": None,
+    "last_refresh": 0
+}
+
+MODEL_TTL = 60
+
 RUNS_BATCHES_CACHE = {
     "runs": None,
     "batches": None,
@@ -30,13 +40,32 @@ PACKAGES_CACHE = {
     "last_refresh": 0
 }
 
-RUNS_BATCHES_TTL = 3000  # 1 minute
+RUNS_BATCHES_TTL = 60  # 1 minute
 PACKAGES_TTL = 300  # 5 minutes
 
 router = APIRouter()
 
 def log_timing(name, start):
     print(f"{name} took {round(time.time() - start, 2)}s")
+
+def get_cached_model(runs, batches):
+    now = time.time()
+
+    if (
+        MODEL_CACHE["model"] is not None and
+        now - MODEL_CACHE["last_refresh"] < MODEL_TTL
+    ):
+        print("Using cached model")
+        return MODEL_CACHE["model"]
+
+    print("Building fresh model...")
+    model = build_production_model(runs, batches)
+
+    with cache_lock:
+        MODEL_CACHE["model"] = model
+        MODEL_CACHE["last_refresh"] = now
+
+    return model
 
 def load_runs_batches():
 
@@ -54,22 +83,22 @@ def load_runs_batches():
             RUNS_BATCHES_CACHE["batches"],
             RUNS_BATCHES_CACHE["batch_map"]
         )
-    
-    if (
-        RUNS_BATCHES_CACHE["runs"] is not None and
-        RUNS_BATCHES_CACHE["batches"] is not None
-    ):
-        print("serving stale cache for runs/batches")
-        return (
-            RUNS_BATCHES_CACHE["runs"],
-            RUNS_BATCHES_CACHE["batches"],
-            RUNS_BATCHES_CACHE["batch_map"]
-        )
+    with cache_lock:
+        if (
+            RUNS_BATCHES_CACHE["runs"] is not None and
+            RUNS_BATCHES_CACHE["batches"] is not None
+        ):
+            print("Using stale cache for runs/batches")
+            return (
+                RUNS_BATCHES_CACHE["runs"],
+                RUNS_BATCHES_CACHE["batches"],
+                RUNS_BATCHES_CACHE["batch_map"]
+            )
 
     # ✅ CACHE MISS → fetch
     print("Fetching fresh runs/batches...")
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         runs_future = executor.submit(get_runs)
         batches_future = executor.submit(get_batches)
 
@@ -90,10 +119,14 @@ def load_runs_batches():
             print("Failed to fetch batches:", repr(e))
             batches = []
 
+    MAX_RUNS = 2000
+
     if isinstance(runs, list):
-        runs = runs[:1000]
+        if len(runs) > MAX_RUNS:
+            print(f"Trimming runs from {len(runs)} to {MAX_RUNS}")
+            runs = runs[:MAX_RUNS]
     else:
-        print("Ruins fetch returned unexpected type:", type(runs), runs)
+        print("Runs fetch returned unexpected type:", type(runs), runs)
         runs = []
 
     batch_map = {b.get("id"): b for b in batches if b.get("id")}
@@ -162,8 +195,8 @@ def build_material_pressure(runs, batch_map):
 
         batch = batch_map.get(run.get("manufacturing_batch_id"), {})
 
-        input_qty = sum(i.get("quantity", 0) for i in cannabis_inputs)
-        output_qty = sum(o.get("quantity", 0) for o in cannabis_outputs)
+        input_qty = sum(float(i.get("quantity") or 0) for i in cannabis_inputs)
+        output_qty = sum(float(o.get("quantity") or 0) for o in cannabis_outputs)
 
         if input_qty == 0:
             pressure = "NO_INPUTS"
@@ -360,11 +393,8 @@ def batch_progress():
 
 @router.get("/ops/bottlenecks")
 def bottlenecks():
-
     runs, batches, batch_map = load_runs_batches()
-
-    model = build_production_model(runs, batches)
-
+    model = get_cached_model(runs, batches)
     return find_bottlenecks(model)
 
 @router.get("/ops/blockers")
@@ -607,22 +637,16 @@ def inventory_health():
 
 @router.get("/ops/production_dag")
 def production_dag():
-
     runs, batches, batch_map = load_runs_batches()
-
-    model = build_production_model(runs, batches)
-
-    dag = build_production_dag(model)
-
-    return dag
+    model = get_cached_model(runs, batches)
+    return build_production_dag(model)
 
 @router.get("/ops/stalled_batches")
 def stalled_batches():
 
     runs, batches, batch_map = load_runs_batches()
 
-    model = build_production_model(runs, batches)
-
+    model = get_cached_model(runs, batches)
     return find_stalled_batches(model)
 
 @router.get("/ops/next_actions")
@@ -634,22 +658,15 @@ def next_actions():
 
 @router.get("/ops/throughput")
 def throughput():
-
     runs, batches, batch_map = load_runs_batches()
-
-    model = build_production_model(runs, batches)
-
+    model = get_cached_model(runs, batches)
     return calculate_throughput(model)
 
 @router.get("/ops/batch_eta")
 def batch_eta():
-
     start = time.time()
-
     runs, batches, batch_map = load_runs_batches()
-
-    model = build_production_model(runs, batches)
-
+    model = get_cached_model(runs, batches)
     log_timing("/ops/batch_eta", start)
     return estimate_batch_eta(model)
 
@@ -699,8 +716,8 @@ def production_velocity():
             continue
 
         try:
-            start_dt = datetime.fromisoformat(start_date)
-            end_dt = datetime.fromisoformat(end_date)
+            start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
         except:
             continue
 
@@ -741,7 +758,7 @@ def system_context():
 
     runs, batches, batch_map = load_runs_batches()
 
-    model = build_production_model(runs, batches)
+    model = get_cached_model(runs, batches)
 
     bottlenecks = find_bottlenecks(model)
     stalled = find_stalled_batches(model)
@@ -793,7 +810,8 @@ def system_context():
         "material_pressure": dict(pressure_counts),
         "stalled_batches": stalled[:10],
         "next_actions": actions[:10],
-        "alerts": alerts
+        "alerts": alerts,
+        "last_updated": now_iso()
     }
 
 @router.get("/ops/overview")
@@ -825,9 +843,11 @@ def overview():
     }
 
     log_timing("/ops/overview", start)
-    return result
-
-import threading
+    
+    return {
+        "summary": result,
+        "last_updated": now_iso()
+    }
 
 def warm_cache():
     try:
@@ -838,7 +858,9 @@ def warm_cache():
     except Exception as e:
         print("Cache warm failed:", e)
 
-threading.Thread(target=warm_cache, daemon=True).start()
+if "bg_thread_started" not in globals():
+    bg_thread_started = True
+    threading.Thread(target=warm_cache, daemon=True).start()
 
 def background_refresh():
     while True:
@@ -846,26 +868,22 @@ def background_refresh():
         try:
             load_runs_batches()
             load_packages()
-            print("Backgrouund cache refreshed")
+            print("Background cache refreshed")
         except Exception as e:
             print("Background refresh failed:", e)
 
-threading.Thread(target=background_refresh, daemon=True).start()
+if "bg_refresh_thread_started" not in globals():
+    bg_refresh_thread_started = True
+    threading.Thread(target=background_refresh, daemon=True).start()
 
 @router.get("/health")
 def health():
     return {"status": "ok",}
 
-# ADD this function right after the background_refresh function
-
-def keep_alive_ping():
-    import requests as req
-    while True:
-        time.sleep(270)  # every 4.5 minutes
-        try:
-            req.get("https://web-production-a1b2b.up.railway.app/health", timeout=10)
-            print("Keep-alive ping sent")
-        except Exception as e:
-            print("Keep-alive failed:", e)
-
-threading.Thread(target=keep_alive_ping, daemon=True).start()
+@router.get("/ops/debug/cache")
+def cache_status():
+    return {
+        "runs_batches_last_refresh": RUNS_BATCHES_CACHE["last_refresh"],
+        "packages_last_refresh": PACKAGES_CACHE["last_refresh"],
+        "model_last_refresh": MODEL_CACHE["last_refresh"]
+    }
