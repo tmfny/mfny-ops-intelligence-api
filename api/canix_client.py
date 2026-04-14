@@ -105,19 +105,27 @@ def get_runs():
 
     url = f"{CANIX_BASE}/manu_batch_runs"
 
-    try:
-        res = requests.get(url, headers=headers, params={"limit": 500})
+    for attempt in range(3):
+        try:
+            res = requests.get(
+                url,
+                headers=headers,
+                params={"limit": 500},
+                timeout=10
+            )
 
-        if res.status_code != 200:
-            print("❌ Failed request:", res.status_code, res.text)
-            return []
+            if res.status_code == 200:
+                data = res.json()
+                print(f"✅ Runs fetched: {len(data)}")
+                return data
 
-        data = res.json()
+            print(f"❌ Runs attempt {attempt+1} failed:", res.status_code)
 
-        print(f"✅ Runs fetched: {len(data)}")
+        except Exception as e:
+            print(f"❌ Runs exception attempt {attempt+1}:", e)
 
-        return data
+        time.sleep(2)
 
-    except Exception as e:
-        print("❌ Exception fetching runs:", e)
-        return []
+    print("🚨 Runs failed after retries — returning empty (warm_cache will protect)")
+
+    return []
