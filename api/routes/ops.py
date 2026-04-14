@@ -39,6 +39,8 @@ PACKAGES_CACHE = {
     "last_refresh": 0
 }
 
+STARTUP_COMPLETE = False
+
 RUNS_BATCHES_TTL = 60  # 1 minute
 PACKAGES_TTL = 300  # 5 minutes
 
@@ -869,8 +871,18 @@ def debug_raw():
 
 @router.on_event("startup")
 def start_background_tasks():
-    # Run once, synchronously
+    global STARTUP_COMPLETE
+
+    if STARTUP_COMPLETE:
+        print("Startup already executed — skipping")
+        return
+
+    STARTUP_COMPLETE = True
+
+    print("Running startup initialization...")
+
+    # Run once
     warm_cache()
 
-    # Then keep refreshing in background
+    # Start ONE background thread
     threading.Thread(target=background_refresh, daemon=True).start()
