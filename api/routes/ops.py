@@ -190,7 +190,10 @@ def warm_cache():
     print("Cache warmed (runs + batches only)")
 
 def background_refresh():
-    time.sleep(240)  # ⬅️ wait first before refreshing
+    print("Background refresh thread started")
+
+    # ⬅️ WAIT before first run (this is the fix)
+    time.sleep(240)
 
     while True:
         try:
