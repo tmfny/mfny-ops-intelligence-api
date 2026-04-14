@@ -630,13 +630,7 @@ def inventory_health():
 
         total_packages += 1
 
-        weight = float(
-            p.get("weight")
-            or p.get("quantity")
-            or p.get("current_quantity")
-            or p.get("initial_quantity")
-            or 0
-        )
+        weight = float(p.get("weight") or 0)
 
         status = str(p.get("status") or "").strip().lower()
 

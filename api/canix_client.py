@@ -38,6 +38,8 @@ def fetch_all(endpoint, limit=200):
     all_data = []
     offset = 0
 
+    MAX_RECORDS = 2000
+
     while True:
 
         params = {
@@ -47,24 +49,44 @@ def fetch_all(endpoint, limit=200):
 
         url = f"{CANIX_BASE}{endpoint}"
 
-        r = requests.get(url, headers=headers, params=params)
+        for attempt in range(3):
+            r = requests.get(url, headers=headers, params=params, timeout=10)
 
-        if r.status_code != 200:
-            return {
-                "error": r.text,
-                "status": r.status_code
-            }
+            if r.status_code == 200:
+                break
 
-        data = r.json()
+            print(f"❌ {endpoint} attempt {attempt+1} failed:", r.status_code)
+
+            time.sleep(2)
+
+        else:
+            print("🚨 All retries failed — using cached fallback if available")
+            return CACHE.get(endpoint, ([], 0))[0]
+        
+        try:
+            data = r.json()
+        except Exception as e:
+            print(f"❌ JSON parse failed for {endpoint}:", e)
+            return CACHE.get(endpoint, ([], 0))[0]
 
         if not data:
             break
 
         all_data.extend(data)
 
+        # HARD LIMIT
+        if len(all_data) >= MAX_RECORDS:
+            print(f"Reached MAX_RECORDS ({MAX_RECORDS}), stopping early")
+            all_data = all_data[:MAX_RECORDS]
+            break
+
         offset += limit
 
     # store in cache
+    if not all_data:
+        print("⚠️ No data fetched — keeping previous cache")
+        return CACHE.get(endpoint, ([], 0))[0]
+
     CACHE[endpoint] = (all_data, now)
 
     print(f"CACHED {len(all_data)} records for {endpoint}")
