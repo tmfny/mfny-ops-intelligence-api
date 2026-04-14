@@ -841,5 +841,8 @@ def debug_raw():
 
 @router.on_event("startup")
 def start_background_tasks():
-    threading.Thread(target=warm_cache, daemon=True).start()
+    # Run once, synchronously
+    warm_cache()
+
+    # Then keep refreshing in background
     threading.Thread(target=background_refresh, daemon=True).start()
