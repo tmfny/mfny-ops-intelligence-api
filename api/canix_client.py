@@ -80,52 +80,54 @@ def get_batches():
 
 
 def get_runs():
-    print("🚨 get_runs() CALLED 🚨")
+    import json
+    import requests
 
-    all_runs = []
+    API_KEY = ...
+    BASE_URL = ...
+
     page = 1
-    limit = 100
+    all_runs = []
+    seen_ids = set()
 
     while True:
-        print(f"🚨 Fetching page {page} 🚨")
+        print(f"📦 Fetching page {page}")
 
-        url = f"{CANIX_BASE}/manu_batch_runs"
+        url = f"{BASE_URL}/manu_batch_runs?page={page}&limit=100"
 
-        params = {
-            "page": page,
-            "limit": limit
-        }
-
-        res = requests.get(url, headers=headers, params=params)
-
-        print("STATUS:", res.status_code)
-        print("TEXT PREVIEW:", res.text[:500])
+        res = requests.get(url, headers={
+            "X-API-Key": API_KEY
+        })
 
         if res.status_code != 200:
-            print("[get_runs] ERROR:", res.status_code, res.text)
+            print("❌ Failed request:", res.status_code)
             break
 
-        json_data = res.json()
+        data = res.json()
 
-        if isinstance(json_data, dict) and "data" in json_data:
-            data = json_data["data"]
-        elif isinstance(json_data, list):
-            data = json_data
-        else:
-            print("[get_runs] Unexpected format:", json_data)
+        if not data or len(data) == 0:
+            print("✅ No more data")
             break
-        
-        if not data:
-            print("[get_runs] No more data")
+
+        # 🚨 DUPLICATE PAGE PROTECTION
+        first_id = data[0].get("id")
+
+        if first_id in seen_ids:
+            print("🛑 Duplicate page detected — stopping")
             break
+
+        seen_ids.add(first_id)
 
         all_runs.extend(data)
 
-        if len(data) < limit:
-            break
-
         page += 1
 
-    print(f"[get_runs] Total runs fetched: {len(all_runs)}")
+        # 🚨 HARD SAFETY LIMIT
+        if page > 50:
+            print("🛑 Page cap reached")
+            break
+
+    print(f"✅ Total runs fetched: {len(all_runs)}")
+
     return all_runs
 
