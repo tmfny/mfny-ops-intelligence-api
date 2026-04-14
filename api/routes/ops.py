@@ -89,7 +89,7 @@ def load_packages():
         packages = PACKAGES_CACHE["packages"]
         last_refresh = PACKAGES_CACHE["last_refresh"]
 
-    if packages and (now - last_refresh < PACKAGES_TTL):
+    if packages is not None and (now - last_refresh < PACKAGES_TTL):
         print("Using cached packages")
         return packages
 
@@ -613,9 +613,16 @@ def inventory_health():
     inactive_packages = 0
     non_sellable_quantity = 0
 
-    SELLABLE = {"available_for_sale"}
+    SELLABLE = {"available_for_sale", "available to sell"}
     RESERVED = {"allocated", "reserved"}
-    NON_SELLABLE = {"quarantined", "held", "in_transit"}
+    NON_SELLABLE = {
+        "quarantined", 
+        "in quarantine", 
+        "held", 
+        "in transit", 
+        "in_transit",
+        "transfer in progress"
+    }
 
     for p in packages:
         if not isinstance(p, dict):
@@ -623,8 +630,25 @@ def inventory_health():
 
         total_packages += 1
 
-        weight = float(p.get("weight") or 0)
+        weight = float(
+            p.get("weight")
+            or p.get("quantity")
+            or p.get("current_quantity")
+            or p.get("initial_quantity")
+            or 0
+        )
+
         status = str(p.get("status") or "").strip().lower()
+
+        if status in SELLABLE:
+            print("SELLABLE PACKAGE DEBUG:", {
+                "status": status,
+                "weight": p.get("weight"),
+                "quantity": p.get("quantity"),
+                "current_quantity": p.get("current_quantity"),
+                "initial_quantity": p.get("initial_quantity")
+            })
+
         is_active = p.get("is_active", True)
 
         status_counts[status] += 1
