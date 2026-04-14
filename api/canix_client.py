@@ -79,43 +79,23 @@ def get_batches():
     return fetch_all("/manu_batches")
 
 def get_runs():
-    page = 1
-    all_runs = []
-    seen_ids = set()
+    print("Fetching runs (single pull)...")
 
-    while True:
-        print(f"📦 Fetching page {page}")
+    url = f"{CANIX_BASE}/manu_batch_runs"
 
-        url = f"{CANIX_BASE}/manu_batch_runs?page={page}&limit=100"
-
-        res = requests.get(url, headers=headers)
+    try:
+        res = requests.get(url, headers=headers, params={"limit": 500})
 
         if res.status_code != 200:
             print("❌ Failed request:", res.status_code, res.text)
-            break
+            return []
 
         data = res.json()
 
-        if not data or len(data) == 0:
-            print("✅ No more data")
-            break
+        print(f"✅ Runs fetched: {len(data)}")
 
-        first_id = data[0].get("id")
+        return data
 
-        if first_id in seen_ids:
-            print("🛑 Duplicate page detected — stopping")
-            break
-
-        seen_ids.add(first_id)
-
-        all_runs.extend(data)
-
-        page += 1
-
-        if page > 50:
-            print("🛑 Page cap reached")
-            break
-
-    print(f"✅ Total runs fetched: {len(all_runs)}")
-
-    return all_runs
+    except Exception as e:
+        print("❌ Exception fetching runs:", e)
+        return []
