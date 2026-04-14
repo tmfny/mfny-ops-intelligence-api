@@ -78,14 +78,7 @@ def get_packages():
 def get_batches():
     return fetch_all("/manu_batches")
 
-
 def get_runs():
-    import json
-    import requests
-
-    API_KEY = ...
-    BASE_URL = ...
-
     page = 1
     all_runs = []
     seen_ids = set()
@@ -93,14 +86,12 @@ def get_runs():
     while True:
         print(f"📦 Fetching page {page}")
 
-        url = f"{BASE_URL}/manu_batch_runs?page={page}&limit=100"
+        url = f"{CANIX_BASE}/manu_batch_runs?page={page}&limit=100"
 
-        res = requests.get(url, headers={
-            "X-API-Key": API_KEY
-        })
+        res = requests.get(url, headers=headers)
 
         if res.status_code != 200:
-            print("❌ Failed request:", res.status_code)
+            print("❌ Failed request:", res.status_code, res.text)
             break
 
         data = res.json()
@@ -109,7 +100,6 @@ def get_runs():
             print("✅ No more data")
             break
 
-        # 🚨 DUPLICATE PAGE PROTECTION
         first_id = data[0].get("id")
 
         if first_id in seen_ids:
@@ -122,7 +112,6 @@ def get_runs():
 
         page += 1
 
-        # 🚨 HARD SAFETY LIMIT
         if page > 50:
             print("🛑 Page cap reached")
             break
@@ -130,4 +119,3 @@ def get_runs():
     print(f"✅ Total runs fetched: {len(all_runs)}")
 
     return all_runs
-
