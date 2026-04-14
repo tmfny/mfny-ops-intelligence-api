@@ -876,10 +876,10 @@ def start_background_tasks():
     if STARTUP_COMPLETE:
         print("Startup already executed — skipping")
         return
+    
+    print("Running startup initialization...")
 
     STARTUP_COMPLETE = True
-
-    print("Running startup initialization...")
 
     # Run once
     warm_cache()
