@@ -190,13 +190,16 @@ def warm_cache():
     print("Cache warmed (runs + batches only)")
 
 def background_refresh():
+    time.sleep(240)  # ⬅️ wait first before refreshing
+
     while True:
-        time.sleep(240)
         try:
             print("Refreshing cache...")
             warm_cache()
         except Exception as e:
             print("Background refresh failed:", e)
+
+        time.sleep(240)
 
 @router.get("/ops/active_runs")
 def active_runs():
