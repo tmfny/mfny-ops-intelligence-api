@@ -4,7 +4,6 @@ from fastapi import APIRouter
 from api.canix_client import get_runs, get_batches, get_packages
 from api.constants import ACTIVE_STATUSES, APPROVAL_STATUSES, COMPLETED_STATUSES
 import time
-import concurrent.futures
 from datetime import datetime, timezone
 from api.ops_model import (
     build_production_model,
@@ -68,110 +67,27 @@ def get_cached_model(runs, batches):
     return model
 
 def load_runs_batches():
-
-    now = time.time()
-
-    # ✅ CACHE HIT
-    if (
-        RUNS_BATCHES_CACHE["runs"] is not None and
-        RUNS_BATCHES_CACHE["batches"] is not None and
-        now - RUNS_BATCHES_CACHE["last_refresh"] <= RUNS_BATCHES_TTL
-    ):
-        print("Using cached runs/batches")
-        return (
-            RUNS_BATCHES_CACHE["runs"],
-            RUNS_BATCHES_CACHE["batches"],
-            RUNS_BATCHES_CACHE["batch_map"]
-        )
     with cache_lock:
-        if (
-            RUNS_BATCHES_CACHE["runs"] is not None and
-            RUNS_BATCHES_CACHE["batches"] is not None
-        ):
-            print("Using stale cache for runs/batches")
-            return (
-                RUNS_BATCHES_CACHE["runs"],
-                RUNS_BATCHES_CACHE["batches"],
-                RUNS_BATCHES_CACHE["batch_map"]
-            )
+        runs = RUNS_BATCHES_CACHE["runs"]
+        batches = RUNS_BATCHES_CACHE["batches"]
+        batch_map = RUNS_BATCHES_CACHE["batch_map"]
 
-    # ✅ CACHE MISS → fetch
-    print("Fetching fresh runs/batches...")
+        # Cache not ready yet (startup phase)
+        if runs is None or batches is None:
+            print("⚠️ Cache not ready yet")
+            return [], [], {}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        runs_future = executor.submit(get_runs)
-        batches_future = executor.submit(get_batches)
-
-        try:
-            runs = runs_future.result()
-        except Exception as e:
-            print("Failed to fetch runs:", repr(e))
-            from api.canix_client import CACHE
-            if "/manu_batch_runs" in CACHE:
-                runs, _ = CACHE["/manu_batch_runs"]
-                print(f"Recovered {len(runs)} runs from canix cache")
-            else:
-                runs = []
-
-        try:
-            batches = batches_future.result(timeout=60)
-        except Exception as e:
-            print("Failed to fetch batches:", repr(e))
-            batches = []
-
-    print(f"Total runs fetched BEFORE trim: {len(runs) if isinstance(runs, list) else 0}")
-
-    MAX_RUNS = 3000
-
-    if isinstance(runs, list):
-        if len(runs) > MAX_RUNS:
-            print(f"Trimming runs from {len(runs)} to {MAX_RUNS}")
-            runs = runs[:MAX_RUNS]
-    else:
-        print("Runs fetch returned unexpected type:", type(runs), runs)
-        runs = []
-
-    batch_map = {b.get("id"): b for b in batches if b.get("id")}
-
-    with cache_lock:
-        RUNS_BATCHES_CACHE["runs"] = runs
-        RUNS_BATCHES_CACHE["batches"] = batches
-        RUNS_BATCHES_CACHE["batch_map"] = batch_map
-        RUNS_BATCHES_CACHE["last_refresh"] = now
-
-        return (
-            RUNS_BATCHES_CACHE["runs"],
-            RUNS_BATCHES_CACHE["batches"],
-            RUNS_BATCHES_CACHE["batch_map"]
-        )
-
+        return runs, batches, batch_map
 
 def load_packages():
-
-    now = time.time()
-
-    if (
-        PACKAGES_CACHE["packages"] is not None and
-        now - PACKAGES_CACHE["last_refresh"] <= PACKAGES_TTL
-    ):
-        print("Using cached packages")
-        with cache_lock:
-            return PACKAGES_CACHE["packages"]
-        
-    print("Fetching fresh packages...")
-
-    try:
-        packages = get_packages()
-    except Exception as e:
-        print("Failed to fetch packages:", e)
-        packages = []
-
     with cache_lock:
-        PACKAGES_CACHE["packages"] = packages
-        PACKAGES_CACHE["last_refresh"] = now
+        packages = PACKAGES_CACHE["packages"]
 
-        return PACKAGES_CACHE["packages"]
+    if packages is None:
+        print("⚠️ Packages cache not ready")
+        return []
 
+    return packages
 
 def load_ops_data_full():
     runs, batches, batch_map = load_runs_batches()
@@ -230,6 +146,35 @@ def build_material_pressure(runs, batch_map):
         })
 
     return pressures
+
+def warm_cache():
+    print("Warming cache...")
+
+    runs = get_runs()
+    batches = get_batches()
+    packages = get_packages()
+
+    batch_map = {b.get("id"): b for b in batches if b.get("id")}
+
+    with cache_lock:
+        RUNS_BATCHES_CACHE["runs"] = runs
+        RUNS_BATCHES_CACHE["batches"] = batches
+        RUNS_BATCHES_CACHE["batch_map"] = batch_map
+        RUNS_BATCHES_CACHE["last_refresh"] = time.time()
+
+        PACKAGES_CACHE["packages"] = packages
+        PACKAGES_CACHE["last_refresh"] = time.time()
+
+    print("Cache warmed")
+
+def background_refresh():
+    while True:
+        time.sleep(240)
+        try:
+            print("Refreshing cache...")
+            warm_cache()
+        except Exception as e:
+            print("Background refresh failed:", e)
 
 @router.get("/ops/active_runs")
 def active_runs():
@@ -877,6 +822,7 @@ def debug_source():
 @router.get("/ops/debug/cache")
 def cache_status():
     return {
+        "cache_ready": RUNS_BATCHES_CACHE["runs"] is not None,
         "runs_batches_last_refresh": RUNS_BATCHES_CACHE["last_refresh"],
         "packages_last_refresh": PACKAGES_CACHE["last_refresh"],
         "model_last_refresh": MODEL_CACHE["last_refresh"]
@@ -884,19 +830,16 @@ def cache_status():
 
 @router.get("/ops/debug/raw")
 def debug_raw():
-    runs, batches, batch_map = load_runs_batches()
+    runs = RUNS_BATCHES_CACHE["runs"]
+    batches = RUNS_BATCHES_CACHE["batches"]
+
     return {
-        "runs_count": len(runs),
-        "batches_count": len(batches),
+        "runs_count": len(runs) if runs else 0,
+        "batches_count": len(batches) if batches else 0,
         "sample_run": runs[0] if runs else None
     }
 
-@router.get("/ops/debug/runs_raw")
-def debug_runs_raw():
-    from api.canix_client import get_runs
-    runs = get_runs()
-    return {
-        "type": str(type(runs)),
-        "length": len(runs) if isinstance(runs, list) else None,
-        "preview": runs[:1] if isinstance(runs, list) and runs else runs
-    }
+@router.on_event("startup")
+def start_background_tasks():
+    threading.Thread(target=warm_cache, daemon=True).start()
+    threading.Thread(target=background_refresh, daemon=True).start()
