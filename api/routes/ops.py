@@ -80,12 +80,33 @@ def load_runs_batches():
         return runs, batches, batch_map
 
 def load_packages():
+    now = time.time()
+
     with cache_lock:
         packages = PACKAGES_CACHE["packages"]
+        last_refresh = PACKAGES_CACHE["last_refresh"]
 
-    if packages is None:
-        print("⚠️ Packages cache not ready")
+    if packages and (now - last_refresh < PACKAGES_TTL):
+        print("Using cached packages")
+        return packages
+
+    print("Fetching packages ON DEMAND...")
+
+    try:
+        packages = get_packages()
+
+        # 🔥 SAFETY LIMIT (prevents memory blowup)
+        if isinstance(packages, list) and len(packages) > 2000:
+            print(f"Trimming packages from {len(packages)} to 2000")
+            packages = packages[:2000]
+
+    except Exception as e:
+        print("Failed to fetch packages:", e)
         return []
+
+    with cache_lock:
+        PACKAGES_CACHE["packages"] = packages
+        PACKAGES_CACHE["last_refresh"] = now
 
     return packages
 
@@ -152,7 +173,11 @@ def warm_cache():
 
     runs = get_runs()
     batches = get_batches()
-    packages = get_packages()
+
+    # 🔥 OPTIONAL SAFETY LIMIT (highly recommended)
+    if isinstance(runs, list) and len(runs) > 500:
+        print(f"Trimming runs from {len(runs)} to 500")
+        runs = runs[:500]
 
     batch_map = {b.get("id"): b for b in batches if b.get("id")}
 
@@ -162,10 +187,7 @@ def warm_cache():
         RUNS_BATCHES_CACHE["batch_map"] = batch_map
         RUNS_BATCHES_CACHE["last_refresh"] = time.time()
 
-        PACKAGES_CACHE["packages"] = packages
-        PACKAGES_CACHE["last_refresh"] = time.time()
-
-    print("Cache warmed")
+    print("Cache warmed (runs + batches only)")
 
 def background_refresh():
     while True:
