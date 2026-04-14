@@ -4,7 +4,8 @@ from fastapi import APIRouter
 from api.canix_client import get_runs, get_batches, get_packages
 from api.constants import ACTIVE_STATUSES, APPROVAL_STATUSES, COMPLETED_STATUSES
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from collections import Counter, defaultdict
 from api.ops_model import (
     build_production_model,
     build_production_dag,
@@ -176,10 +177,18 @@ def warm_cache():
     runs = get_runs()
     batches = get_batches()
 
+    if not isinstance(runs, list):
+        print("❌ Runs is not a list:", type(runs))
+        runs = []
+
+    if not isinstance(batches, list):
+        print("❌ Batches is not a list:", type(batches))
+        batches = []
+
     # 🔥 OPTIONAL SAFETY LIMIT (highly recommended)
     if isinstance(runs, list) and len(runs) > 500:
         print(f"Trimming runs from {len(runs)} to 500")
-        runs = runs[:500]
+        runs = runs[-500:]
 
     batch_map = {b.get("id"): b for b in batches if b.get("id")}
 
@@ -189,7 +198,7 @@ def warm_cache():
         RUNS_BATCHES_CACHE["batch_map"] = batch_map
         RUNS_BATCHES_CACHE["last_refresh"] = time.time()
 
-    print("Cache warmed (runs + batches only)")
+    print(f"Cache warmed | runs: {len(runs)} | batches: {len(batches)}")
 
 def background_refresh():
     print("Background refresh thread started")
@@ -579,35 +588,39 @@ def inventory_risk():
 def inventory_health():
 
     start = time.time()
-
+    status_counts = Counter()
     runs, batches, batch_map, packages = load_ops_data_full()
 
     total_packages = 0
     total_quantity = 0
-
     available_quantity = 0
     reserved_quantity = 0
-
     inactive_packages = 0
+    non_sellable_quantity = 0
+
+    SELLABLE = {"available_for_sale"}
+    RESERVED = {"allocated", "reserved"}
+    NON_SELLABLE = {"quarantined", "held", "in_transit"}
 
     for p in packages:
-
         if not isinstance(p, dict):
             continue
 
         total_packages += 1
 
-        weight = p.get("weight") or 0
-        status = p.get("status")
+        weight = float(p.get("weight") or 0)
+        status = str(p.get("status") or "").strip().lower()
         is_active = p.get("is_active", True)
 
+        status_counts[status] += 1
         total_quantity += weight
 
-        if status == "Active":
+        if status in SELLABLE:
             available_quantity += weight
-
-        elif status == "Allocated":
+        elif status in RESERVED:
             reserved_quantity += weight
+        elif status in NON_SELLABLE:
+            non_sellable_quantity += weight
 
         if not is_active:
             inactive_packages += 1
@@ -618,7 +631,9 @@ def inventory_health():
         "total_quantity": round(total_quantity, 2),
         "available_quantity": round(available_quantity, 2),
         "reserved_quantity": round(reserved_quantity, 2),
-        "inactive_packages": inactive_packages
+        "inactive_packages": inactive_packages,
+        "status_counts": dict(status_counts),
+        "non_sellable_quantity": round(non_sellable_quantity, 2)
     }
 
 @router.get("/ops/production_dag")
@@ -669,9 +684,6 @@ def material_pressure():
     runs, batches, batch_map = load_runs_batches()
 
     return build_material_pressure(runs, batch_map)
-
-from collections import defaultdict
-from datetime import datetime, timezone, timedelta
 
 @router.get("/ops/production_velocity")
 def production_velocity():
@@ -753,8 +765,6 @@ def system_context():
     pressure = build_material_pressure(runs, batch_map)
     actions = get_next_actions(runs, batch_map)
 
-    from collections import Counter
-
     pressure_counts = Counter(p["pressure"] for p in pressure)
 
     # summary counts
@@ -781,7 +791,7 @@ def system_context():
     if len(stalled) > 10:
         alerts.append("High number of stalled batches")
 
-    if pressure_counts.get("NO_INPUTS", 0) > 5:
+    if pressure_counts.get("NO_INPUT_DEFINITION", 0) > 5:
         alerts.append("Multiple runs missing material")
 
     if bottlenecks and bottlenecks[0]["runs_waiting"] > 10:
