@@ -110,7 +110,7 @@ def get_runs():
             res = requests.get(
                 url,
                 headers=headers,
-                params={"limit": 500},
+                params={"limit": 200},
                 timeout=10
             )
 
@@ -124,7 +124,7 @@ def get_runs():
         except Exception as e:
             print(f"❌ Runs exception attempt {attempt+1}:", e)
 
-        time.sleep(2)
+        time.sleep(1)
 
     print("🚨 Runs failed after retries — returning empty (warm_cache will protect)")
 
