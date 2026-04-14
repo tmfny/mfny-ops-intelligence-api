@@ -174,19 +174,34 @@ def build_material_pressure(runs, batch_map):
 def warm_cache():
     print("Warming cache...")
 
-    runs = get_runs()
-    batches = get_batches()
+    runs = []
 
-    if not isinstance(runs, list):
-        print("❌ Runs is not a list:", type(runs))
-        runs = []
+    for attempt in range(3):
+        try:
+            print(f"Fetching runs (attempt {attempt+1})...")
+            runs = get_runs()
+
+            if isinstance(runs, list) and len(runs) > 0:
+                break
+
+        except Exception as e:
+            print(f"❌ Runs fetch failed (attempt {attempt+1}):", e)
+
+        time.sleep(5)
+
+    # 🔥 CRITICAL PROTECTION
+    if not runs:
+        print("🚨 WARNING: No runs fetched — keeping previous cache")
+        return
+
+    batches = get_batches()
 
     if not isinstance(batches, list):
         print("❌ Batches is not a list:", type(batches))
         batches = []
 
-    # 🔥 OPTIONAL SAFETY LIMIT (highly recommended)
-    if isinstance(runs, list) and len(runs) > 500:
+    # 🔥 SAFETY LIMIT
+    if len(runs) > 500:
         print(f"Trimming runs from {len(runs)} to 500")
         runs = runs[-500:]
 
