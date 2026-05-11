@@ -8,8 +8,6 @@ CANIX_BASE = "https://api.canix.com/api/v1"
 
 API_KEY = os.getenv("CANIX_API_KEY")
 
-print("CANIX KEY LOADED:", API_KEY)  # ← ADD THIS LINE
-
 headers = {
     "x-api-key": API_KEY,
     "Content-Type": "application/json"
@@ -50,7 +48,7 @@ def fetch_all(endpoint, limit=200):
         url = f"{CANIX_BASE}{endpoint}"
 
         for attempt in range(3):
-            r = requests.get(url, headers=headers, params=params, timeout=10)
+            r = requests.get(url, headers=headers, params=params, timeout=60)
 
             if r.status_code == 200:
                 break
@@ -111,7 +109,7 @@ def get_runs():
                 url,
                 headers=headers,
                 params={"limit": 200},
-                timeout=10
+                timeout=60
             )
 
             if res.status_code == 200:
@@ -124,7 +122,7 @@ def get_runs():
         except Exception as e:
             print(f"❌ Runs exception attempt {attempt+1}:", e)
 
-        time.sleep(1)
+        time.sleep(3)
 
     print("🚨 Runs failed after retries — returning empty (warm_cache will protect)")
 
