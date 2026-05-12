@@ -1,10 +1,11 @@
 """
 Executive endpoints — feed the investor-grade Executive page in Retool.
 
-Currently a single endpoint backed by v_executive_flow, which consolidates
-seven hero-node values into a single row. As the Executive page expands,
-additional endpoints will live here (production_funnel, cultivation_pipeline,
-forward_signals, etc.).
+Endpoints:
+  GET /executive/flow        — Hero subway-map values (single row from v_executive_flow)
+  GET /executive/throughput  — Production Story zone: monthly chart rows + KPI summary
+                               (combines v_executive_production_throughput and
+                                v_executive_production_summary into one response)
 """
 
 from fastapi import APIRouter, HTTPException
@@ -22,16 +23,6 @@ def executive_flow():
     hero flow diagram. Always returns exactly one row with twelve columns —
     one per node, with weight/package_count pairs for the material-pressure
     nodes.
-
-    Column reference (by hero node):
-      1. cultivation_facility_count       — hardcoded 4
-      2. fresh_frozen_lbs / _packages     — from v_material_pressure
-      3. cured_flower_lbs / _packages     — from v_material_pressure
-      4. active_production_count          — filtered v_active_production
-      5. extracted_grams / _packages      — from v_material_pressure
-      6. concentrate_ready_grams / _pkgs  — from v_material_pressure
-      7. finished_units_shipped /         — bronze_packages where facility_id=4510
-         finished_distinct_skus             and status='Transferred'
     """
     try:
         rows = query_view("v_executive_flow")
@@ -43,4 +34,40 @@ def executive_flow():
         }
     except Exception as e:
         logger.error(f"executive_flow failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+@router.get("/executive/throughput")
+def executive_throughput():
+    """
+    Returns data for the Production Story zone on the Executive page.
+
+    Response shape combines two views:
+      - chart_rows: list of (month, stage, run_count) for the stacked bar chart.
+                    Covers Apr 2025 (operational launch) through current month.
+      - summary:    single object with KPI tile values (last_month_runs,
+                    trailing_3mo_avg, peak_runs) and their period-over-period
+                    deltas. Excludes the current partial month for honest M/M
+                    comparison.
+
+    Used by:
+      - Retool Executive page chart component (chart_rows)
+      - Retool KPI tiles for last month / 3-month avg / all-time peak (summary)
+    """
+    try:
+        chart_rows = query_view("v_executive_production_throughput")
+        summary_rows = query_view("v_executive_production_summary")
+
+        # Summary view returns exactly one row; surface as a single object.
+        summary = summary_rows[0] if summary_rows else None
+
+        return {
+            "source": "bigquery",
+            "view": "v_executive_production_throughput + v_executive_production_summary",
+            "chart_rows": chart_rows,
+            "chart_row_count": len(chart_rows),
+            "summary": summary
+        }
+    except Exception as e:
+        logger.error(f"executive_throughput failed: {e}")
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
