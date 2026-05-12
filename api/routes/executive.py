@@ -71,3 +71,37 @@ def executive_throughput():
     except Exception as e:
         logger.error(f"executive_throughput failed: {e}")
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+    
+@router.get("/executive/inventory")
+def executive_inventory():
+    """
+    Returns data for the Inventory Health zone on the Executive page.
+
+    Response combines two views:
+      - chart_rows: list of (category, total_packages, sellable_packages,
+                    transferred_packages) for the inventory-by-category chart.
+                    Six rows: Concentrates, Edibles, Vapes, Pre-Rolls,
+                    Tinctures, Topicals.
+      - summary:    single object with KPI tile values (sellable_now,
+                    cumulative_shipped, days_of_inventory, etc.).
+
+    Distribution facility 4510 is the source of truth for finished-goods
+    inventory and shipping. Biomass / intermediate categories are excluded
+    from this zone.
+    """
+    try:
+        chart_rows = query_view("v_executive_inventory_health")
+        summary_rows = query_view("v_executive_inventory_summary")
+
+        summary = summary_rows[0] if summary_rows else None
+
+        return {
+            "source": "bigquery",
+            "view": "v_executive_inventory_health + v_executive_inventory_summary",
+            "chart_rows": chart_rows,
+            "chart_row_count": len(chart_rows),
+            "summary": summary
+        }
+    except Exception as e:
+        logger.error(f"executive_inventory failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
