@@ -105,3 +105,36 @@ def executive_inventory():
     except Exception as e:
         logger.error(f"executive_inventory failed: {e}")
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+    
+@router.get("/executive/biomass")
+def executive_biomass():
+    """
+    Returns data for the Biomass at Processor zone on the Executive page.
+
+    Response combines two views:
+      - chart_rows: list of (strain, package_count, total_weight_lbs,
+                    avg_days_on_hand) for the strain breakdown chart.
+                    Sorted by total_weight_lbs descending.
+      - summary:    single object with total_biomass_lbs, total_packages,
+                    distinct_strains, top_strain_name, top_strain_lbs.
+
+    Filters: facility 4511 (processor), biomass categories only, active
+    packages only, weight > 0. Wet Whole Plant excluded due to unreliable
+    weight data.
+    """
+    try:
+        chart_rows = query_view("v_executive_biomass_health")
+        summary_rows = query_view("v_executive_biomass_summary")
+
+        summary = summary_rows[0] if summary_rows else None
+
+        return {
+            "source": "bigquery",
+            "view": "v_executive_biomass_health + v_executive_biomass_summary",
+            "chart_rows": chart_rows,
+            "chart_row_count": len(chart_rows),
+            "summary": summary
+        }
+    except Exception as e:
+        logger.error(f"executive_biomass failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
