@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from api.routes import packages, batches, runs, ops, inventory, production, compliance, velocity, runs_batches, synthesis, executive, inventory_valuation, qc
+from api.routes import packages, batches, runs, ops, inventory, production, compliance, velocity, runs_batches, synthesis, executive, inventory_valuation, qc, distribution
 app = FastAPI(title="MFNY Ops Intelligence API")
 
 # New BigQuery-backed routers (registered first to take precedence)
@@ -18,6 +18,7 @@ app.include_router(batches.router)
 app.include_router(runs.router)
 app.include_router(ops.router)
 app.include_router(qc.router)
+app.include_router(distribution.router)
 
 
 @app.get("/")
