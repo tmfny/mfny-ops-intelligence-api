@@ -12,8 +12,10 @@ Endpoints:
                                   - pending_orders: orders in pre-shipment
                                                      statuses, bucketed by
                                                      delivery date urgency
-                                  (more zones to come as page builds out:
-                                   today's deliveries, ready for transfer)
+                                  - today_deliveries: transfers scheduled
+                                                      to depart today
+                                  (more zones to come: ready for transfer,
+                                   transfer manifest queue)
 """
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -66,11 +68,7 @@ def _compute_cutoff_status() -> dict:
 
 def _fetch_status_strip_inventory() -> dict:
     """
-    Returns inventory aggregates for the Distribution Status strip:
-      - total_packages: all active packages at 4510
-      - available_packages: packages with status='Available To Sell'
-      - available_units: sum of weight on available packages
-      - total_units: sum of weight on all active packages
+    Returns inventory aggregates for the Distribution Status strip.
     """
     client = bigquery.Client(project=PROJECT_ID)
     query = f"""
@@ -100,6 +98,35 @@ def _fetch_status_strip_inventory() -> dict:
     }
 
 
+def _compute_today_deliveries_summary(deliveries: list) -> dict:
+    """
+    Builds aggregate counts and totals for the Today's Delivery Schedule
+    panel: total, main, samples, plus headline values.
+    """
+    samples = [d for d in deliveries if d.get("is_samples")]
+    main = [d for d in deliveries if not d.get("is_samples")]
+
+    total_packages = sum(d.get("package_count") or 0 for d in deliveries)
+    total_units = sum(d.get("total_units_shipped") or 0 for d in deliveries)
+
+    earliest = None
+    latest = None
+    if deliveries:
+        # View is sorted by departure_datetime_et ASC, so first = earliest
+        earliest = deliveries[0].get("departure_time_et_display", "").strip()
+        latest = deliveries[-1].get("departure_time_et_display", "").strip()
+
+    return {
+        "total_count": len(deliveries),
+        "main_count": len(main),
+        "samples_count": len(samples),
+        "total_packages": total_packages,
+        "total_units": total_units,
+        "earliest_departure_et": earliest,
+        "latest_departure_et": latest,
+    }
+
+
 @router.get("/distribution/dashboard")
 def distribution_dashboard():
     """
@@ -109,16 +136,22 @@ def distribution_dashboard():
       - status_strip (object): top-of-page scalars combining inventory
                                 aggregates with cutoff state.
       - pending_orders (list): sales orders at facility 4510 with status
-                                IN ('created', 'approved', 'requested'),
-                                bucketed by delivery_date urgency.
+                                IN ('created', 'approved', 'requested').
       - pending_orders_count (int): total pending orders.
       - pending_orders_summary (object): aggregate counts and dollar
                                           values per urgency bucket.
+      - today_deliveries (list): transfers scheduled to depart today
+                                  (America/New_York), sorted by
+                                  departure_datetime_et ASC.
+      - today_deliveries_summary (object): aggregate counts (total,
+                                            main, samples), package
+                                            and unit totals, earliest
+                                            and latest departure times.
     """
     try:
+        # Zone: Pending Orders
         pending_orders = query_view("v_distribution_pending_orders")
 
-        # Pending orders summary (computed in-loop to avoid two passes)
         bucket_counts = {"OVERDUE": 0, "TODAY": 0, "UPCOMING": 0, "NO_DATE": 0}
         bucket_values = {"OVERDUE": 0.0, "TODAY": 0.0, "UPCOMING": 0.0, "NO_DATE": 0.0}
         longest_days_overdue = 0
@@ -133,7 +166,6 @@ def distribution_dashboard():
                 longest_days_overdue = max(longest_days_overdue, abs(days))
 
         total_value = sum(bucket_values.values())
-
         pending_summary = {
             "total_orders": len(pending_orders),
             "overdue_count": bucket_counts["OVERDUE"],
@@ -148,7 +180,7 @@ def distribution_dashboard():
             "longest_days_overdue": longest_days_overdue,
         }
 
-        # Status strip: inventory + cutoff
+        # Zone: Status strip
         inventory = _fetch_status_strip_inventory()
         cutoff = _compute_cutoff_status()
         status_strip = {
@@ -157,13 +189,19 @@ def distribution_dashboard():
             "cutoff": cutoff,
         }
 
+        # Zone: Today's Deliveries
+        today_deliveries = query_view("v_distribution_today_deliveries")
+        today_deliveries_summary = _compute_today_deliveries_summary(today_deliveries)
+
         return {
             "source": "bigquery",
-            "view": "v_distribution_pending_orders + bronze_packages",
+            "view": "v_distribution_pending_orders + v_distribution_today_deliveries + bronze_packages",
             "status_strip": status_strip,
             "pending_orders": pending_orders,
             "pending_orders_count": len(pending_orders),
             "pending_orders_summary": pending_summary,
+            "today_deliveries": today_deliveries,
+            "today_deliveries_summary": today_deliveries_summary,
         }
     except Exception as e:
         logger.error(f"distribution_dashboard failed: {e}")
