@@ -31,3 +31,5 @@ env/
 # Misc
 *.csv
 *.xlsx
+# Nested clone of separate repository — managed independently
+mfny-ingestion/

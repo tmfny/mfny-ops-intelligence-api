@@ -1,0 +1,46 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Environment files (NEVER deploy secrets in container images)
+.env
+.env.local
+.env.*.local
+service-account-key.json
+*.pem
+*.key
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.tar.gz
+
+# Local development tools
+claude_mcp_server.py
+claude_ops_bridge.py
+dashboard/
+
+# Testing artifacts
+.coverage
+htmlcov/
+*.log
