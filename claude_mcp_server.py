@@ -4,7 +4,7 @@ import subprocess
 import time
 import os
 
-API = "https://web-production-a1b2b.up.railway.app"
+API = "https://transmitted-qty-selecting-colin.trycloudflare.com"
 PROJECT_PATH = "/Users/tmiles/Desktop/mfny_ops_platform"
 
 def ensure_api_running():
@@ -19,7 +19,7 @@ def ensure_api_running():
         )
         time.sleep(3)
 
-ensure_api_running()
+# ensure_api_running() # disabled - using Cloudflare Tunnel now
 mcp = FastMCP("mfny_ops")
 
 @mcp.tool()
