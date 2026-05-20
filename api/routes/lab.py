@@ -6,16 +6,18 @@ inventory at the processor (4511), plus sales velocity for allocation
 context.
 
 Endpoints:
-  GET /lab/dashboard — Combined response with three zones:
+  GET /lab/dashboard — Combined response with four zones:
                         - status_strip: 4 tiles (Fresh Frozen, Concentrate,
                                                   Decarb, Active Extraction Runs)
                         - biomass_inventory: rows by (stage, subcategory, strain)
                                               at the processor
                         - sales_by_sku: monthly units/revenue per SKU,
                                          trailing 12 months, deduped by name
+                        - greenhouse_status: upstream cultivation pipeline,
+                                              rows per (facility, greenhouse)
+                                              with phase/age/strain detail
 
   Future zones to consider:
-    - Greenhouse Status (pending bronze_plants ingestion)
     - Lab Testing Pipeline (blocked on workflow gap: test_status NULL)
     - Hash Allocation Forecast (pending package lineage extraction)
 """
@@ -129,6 +131,53 @@ def _compute_sales_summary(sales_rows: list) -> dict:
     }
 
 
+def _compute_greenhouse_summary(greenhouse_rows: list) -> dict:
+    """
+    Roll up the greenhouse status rows into top-level totals for the
+    Lab page's upstream-biomass context.
+
+    Rows come from v_greenhouse_status (one row per facility+greenhouse),
+    already SANDBOX-filtered. Used to give Galen a quick sense of "what
+    biomass is coming downstream into the processor."
+    """
+    if not greenhouse_rows:
+        return {
+            "total_active_plants": 0,
+            "total_flowering": 0,
+            "total_vegetative": 0,
+            "active_greenhouses": 0,
+            "active_facilities": 0,
+        }
+
+    total_plants = 0
+    total_flowering = 0
+    total_vegetative = 0
+    facilities = set()
+    greenhouses = 0
+
+    for row in greenhouse_rows:
+        plant_count = int(row.get("plant_count") or 0)
+        total_plants += plant_count
+        total_flowering += int(row.get("flowering_count") or 0)
+        total_vegetative += int(row.get("vegetative_count") or 0)
+
+        # Count "active" greenhouses (plants present, excluding Unclassified)
+        # — Galen cares about greenhouse-level activity, not the Clone Room.
+        if row.get("greenhouse") and row.get("greenhouse") != "Unclassified" and plant_count > 0:
+            greenhouses += 1
+
+        if row.get("facility_id"):
+            facilities.add(row["facility_id"])
+
+    return {
+        "total_active_plants": total_plants,
+        "total_flowering": total_flowering,
+        "total_vegetative": total_vegetative,
+        "active_greenhouses": greenhouses,
+        "active_facilities": len(facilities),
+    }
+
+
 @router.get("/lab/dashboard")
 def lab_dashboard():
     """
@@ -146,6 +195,12 @@ def lab_dashboard():
                               item_id issue handled here).
       - sales_summary (object): all-12mo totals plus top-5 current-month
                                  highlight.
+      - greenhouse_status (list): rows per (facility, greenhouse) with
+                                   active-plant counts by phase, age,
+                                   strain detail. SANDBOX-filtered.
+      - greenhouse_summary (object): top-level totals of active plants,
+                                      flowering/vegetative split, active
+                                      greenhouse and facility counts.
     """
     try:
         # Zone: Status strip — single-row scalar view
@@ -181,14 +236,20 @@ def lab_dashboard():
         sales_by_sku = query_view("v_sales_by_sku_monthly")
         sales_summary = _compute_sales_summary(sales_by_sku)
 
+        # Zone: Greenhouse status — upstream cultivation pipeline view
+        greenhouse_status = query_view("v_greenhouse_status")
+        greenhouse_summary = _compute_greenhouse_summary(greenhouse_status)
+
         return {
             "source": "bigquery",
-            "view": "v_lab_biomass_inventory + v_lab_status_strip + v_sales_by_sku_monthly",
+            "view": "v_lab_biomass_inventory + v_lab_status_strip + v_sales_by_sku_monthly + v_greenhouse_status",
             "status_strip": status_strip,
             "biomass_inventory": biomass_inventory,
             "biomass_summary": biomass_summary,
             "sales_by_sku": sales_by_sku,
             "sales_summary": sales_summary,
+            "greenhouse_status": greenhouse_status,
+            "greenhouse_summary": greenhouse_summary,
         }
     except HTTPException:
         raise
