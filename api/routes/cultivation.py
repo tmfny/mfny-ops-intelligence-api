@@ -6,29 +6,36 @@ broader team includes leads at the two active cultivation facilities:
 4509 (MFNY Ops Cultivation) and 4528 (American Seed & Oil)).
 
 Note on data trust: Canix's cultivation date fields (vegetative_date,
-flowering_date, harvested_date) have semantics that don't match their
-names — averages don't reconcile with real cannabis cycle biology.
+flowering_date) have semantics that don't match their names — averages
+don't reconcile with real cannabis cycle biology. harvested_date IS NOT
+NULL DOES reliably indicate a plant is harvested (confirmed 2026-05-20).
 We've intentionally limited this v1 page to plant counts, phase splits,
-and greenhouse/strain aggregations. Date-derived metrics are deferred
-until we can clarify field meanings with Ian or the cultivation leads.
+greenhouse/strain aggregations, and run-level yield. Date-derived
+lifecycle metrics deferred until field meanings clarified with Ian.
 
 Endpoints:
-  GET /cultivation/dashboard — Combined response with three zones:
-                                - status_strip: 4 tiles (total plants,
-                                                          flowering, vegetative,
-                                                          active greenhouses)
+  GET /cultivation/dashboard — Combined response with four zones:
+                                - status_strip: 6 tile values (total
+                                                          plants, flowering,
+                                                          vegetative,
+                                                          active greenhouses,
+                                                          strains, facilities)
                                 - greenhouse_status: rows per (facility,
                                                      greenhouse) — same view
                                                      used on Lab page
-                                - strain_mix: rows per strain with phase split,
-                                              batch/facility/greenhouse coverage
+                                - strain_mix: rows per strain with phase
+                                              split, batch/facility/greenhouse
+                                              coverage
+                                - yield_efficiency: run-level yield rows
+                                                     sliced to last 90 days
+                                                     (answers Ian's #1 wish)
 
   Future zones planned (deferred to v2):
-    - Yield Efficiency: extracted yields vs biomass yields by harvest_date.
-      Ian's #1 wished metric. Requires harvest → biomass package → extraction
-      run lineage walk. Same data path as the Lab page's hash allocation
-      forecast.
+    - Cultivation lifecycle timing (blocked on date-field clarification)
+    - Yield efficiency v2: split extraction category into Fresh Freeze vs
+      concentrate extraction for cleaner per-stage averages
 """
+from datetime import date, timedelta
 from fastapi import APIRouter, HTTPException
 
 from api.bq_client import query_view
@@ -37,6 +44,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Yield window — number of days back from today to include in the dashboard.
+# Per session 2026-05-21 design: 90-day window for daily check use case.
+YIELD_WINDOW_DAYS = 90
 
 
 def _compute_strain_mix_summary(strain_rows: list) -> dict:
@@ -134,13 +145,143 @@ def _compute_greenhouse_summary(greenhouse_rows: list) -> dict:
     }
 
 
+def _slice_yield_to_window(yield_rows: list, window_days: int) -> list:
+    """
+    Filter yield rows to the last N days based on start_date.
+
+    The view returns ALL runs (~1,300 rows). For the dashboard's 90-day
+    window we filter here in Python rather than at the view level — this
+    keeps the view reusable for future deeper-history exploration without
+    requiring new view variants.
+
+    Defensive against missing or malformed start_date values.
+    """
+    if not yield_rows or window_days <= 0:
+        return yield_rows or []
+
+    cutoff = date.today() - timedelta(days=window_days)
+    filtered = []
+
+    for row in yield_rows:
+        start_date_val = row.get("start_date")
+        if start_date_val is None:
+            continue
+        # BigQuery DATE comes back as either a date object or ISO string
+        # depending on the client library. Handle both.
+        if isinstance(start_date_val, str):
+            try:
+                start_date_obj = date.fromisoformat(start_date_val)
+            except (ValueError, TypeError):
+                continue
+        elif isinstance(start_date_val, date):
+            start_date_obj = start_date_val
+        else:
+            continue
+
+        if start_date_obj >= cutoff:
+            filtered.append(row)
+
+    return filtered
+
+
+def _compute_yield_summary(yield_rows: list) -> dict:
+    """
+    Roll up the windowed yield rows into top-level metrics for the
+    Cultivation page's Yield Efficiency zone.
+
+    Surfaces per-category counts and average yield, plus distinct strains
+    and the most-recent run date. Powers the zone header so Ian can see
+    "X runs in last 90 days, Y strains, last run on date Z" without
+    scanning the table.
+
+    Yield-meaningful categories: extraction, pressing, decarb,
+    biomass_processing, processing.
+    Yield-NOT-meaningful: manufacturing (non-cannabis weight added).
+    """
+    if not yield_rows:
+        return {
+            "total_runs": 0,
+            "completed_runs": 0,
+            "in_progress_runs": 0,
+            "distinct_strains": 0,
+            "most_recent_run_date": None,
+            "categories": {},
+        }
+
+    completed = 0
+    in_progress = 0
+    strains = set()
+    most_recent = None
+
+    # Per-category aggregates: count + sum + count_with_yield for averaging
+    category_aggs = {}
+
+    for row in yield_rows:
+        status = row.get("status")
+        if status == "SUBMITTED":
+            completed += 1
+        elif status in ("OPEN", "PENDING_CONFIGURATION"):
+            in_progress += 1
+
+        strain = row.get("strain")
+        if strain:
+            strains.add(strain)
+
+        start_date_val = row.get("start_date")
+        if start_date_val is not None:
+            # Normalize to comparable string form
+            if isinstance(start_date_val, str):
+                date_str = start_date_val
+            elif isinstance(start_date_val, date):
+                date_str = start_date_val.isoformat()
+            else:
+                date_str = None
+            if date_str and (most_recent is None or date_str > most_recent):
+                most_recent = date_str
+
+        category = row.get("run_category", "other")
+        if category not in category_aggs:
+            category_aggs[category] = {
+                "count": 0,
+                "yield_sum": 0.0,
+                "yield_count": 0,
+            }
+        category_aggs[category]["count"] += 1
+
+        yield_val = row.get("computed_yield_pct")
+        if yield_val is not None:
+            category_aggs[category]["yield_sum"] += float(yield_val)
+            category_aggs[category]["yield_count"] += 1
+
+    # Compute averages per category
+    categories = {}
+    for cat, aggs in category_aggs.items():
+        avg_yield = None
+        if aggs["yield_count"] > 0:
+            avg_yield = round(aggs["yield_sum"] / aggs["yield_count"], 1)
+        categories[cat] = {
+            "run_count": aggs["count"],
+            "runs_with_yield": aggs["yield_count"],
+            "avg_yield_pct": avg_yield,
+        }
+
+    return {
+        "total_runs": len(yield_rows),
+        "completed_runs": completed,
+        "in_progress_runs": in_progress,
+        "distinct_strains": len(strains),
+        "most_recent_run_date": most_recent,
+        "categories": categories,
+    }
+
+
 @router.get("/cultivation/dashboard")
 def cultivation_dashboard():
     """
     Returns data for the Cultivation page in Retool.
 
     Response zones:
-      - status_strip (object): 4 tile values (total_active_plants,
+      - status_strip (object): 6 tile values (total_active_plants,
                                 flowering_count, vegetative_count,
                                 active_greenhouses, distinct_strains,
                                 active_facilities). Single row from
@@ -155,6 +296,13 @@ def cultivation_dashboard():
                             Sorted by total_plants DESC.
       - strain_mix_summary (object): rolled-up strain metrics and top 5
                                       highlight.
+      - yield_efficiency (list): run-level yield rows, last 90 days only.
+                                  Each row includes run_category for
+                                  filtering. Manufacturing rows have
+                                  computed_yield_pct=NULL (yield not
+                                  meaningful — non-cannabis weight added).
+      - yield_summary (object): per-category counts and avg yield, plus
+                                 strain coverage and most-recent run date.
     """
     try:
         # Zone: Status strip — single-row scalar view
@@ -182,14 +330,27 @@ def cultivation_dashboard():
         strain_mix = query_view("v_cultivation_strain_mix")
         strain_mix_summary = _compute_strain_mix_summary(strain_mix)
 
+        # Zone: Yield efficiency — run-level rows from v_yield_efficiency_by_run,
+        # sliced to YIELD_WINDOW_DAYS in Python so the view stays reusable for
+        # deeper-history exploration later. View returns ~1,300 rows total;
+        # filtered to ~300-400 in the 90-day window.
+        all_yield_rows = query_view("v_yield_efficiency_by_run")
+        yield_efficiency = _slice_yield_to_window(all_yield_rows, YIELD_WINDOW_DAYS)
+        yield_summary = _compute_yield_summary(yield_efficiency)
+
         return {
             "source": "bigquery",
-            "view": "v_cultivation_status_strip + v_greenhouse_status + v_cultivation_strain_mix",
+            "view": (
+                "v_cultivation_status_strip + v_greenhouse_status + "
+                "v_cultivation_strain_mix + v_yield_efficiency_by_run"
+            ),
             "status_strip": status_strip,
             "greenhouse_status": greenhouse_status,
             "greenhouse_summary": greenhouse_summary,
             "strain_mix": strain_mix,
             "strain_mix_summary": strain_mix_summary,
+            "yield_efficiency": yield_efficiency,
+            "yield_summary": yield_summary,
         }
     except HTTPException:
         raise
