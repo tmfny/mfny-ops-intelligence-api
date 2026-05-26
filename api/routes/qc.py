@@ -55,16 +55,18 @@ def qc_dashboard():
     try:
         outstanding = query_view("v_compliance_timing")
         recent_activity_rows = query_view("v_qc_recent_activity")
+        daily_activity_rows = query_view("v_qc_daily_activity")
 
         # Recent activity view returns exactly one row; surface as object
         recent_activity = recent_activity_rows[0] if recent_activity_rows else None
 
         return {
             "source": "bigquery",
-            "view": "v_compliance_timing + v_qc_recent_activity",
+            "view": "v_compliance_timing + v_qc_recent_activity + v_qc_daily_activity",
             "outstanding": outstanding,
             "outstanding_count": len(outstanding),
             "recent_activity": recent_activity,
+            "daily_activity": daily_activity_rows,
         }
     except Exception as e:
         logger.error(f"qc_dashboard failed: {e}")
