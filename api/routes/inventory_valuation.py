@@ -53,8 +53,8 @@ def ops_inventory_valuation():
     try:
         summary_rows = query_view("v_inventory_valuation_summary")
         by_category  = query_view("v_inventory_valuation_by_category")
-        by_strain    = query_view("v_inventory_valuation_by_strain")
-        by_sku       = query_view("v_inventory_valuation_by_sku")
+        by_strain    = query_view("v_inventory_valuation_by_strain_drillable")
+        by_sku       = query_view("v_inventory_valuation_by_sku_drillable")
         packages     = query_view("v_inventory_valuation")
 
         summary = summary_rows[0] if summary_rows else None
@@ -64,8 +64,8 @@ def ops_inventory_valuation():
             "view": (
                 "v_inventory_valuation_summary + "
                 "v_inventory_valuation_by_category + "
-                "v_inventory_valuation_by_strain + "
-                "v_inventory_valuation_by_sku + "
+                "v_inventory_valuation_by_strain_drillable + "
+                "v_inventory_valuation_by_sku_drillable + "
                 "v_inventory_valuation"
             ),
             "summary": summary,
