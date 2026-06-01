@@ -38,6 +38,70 @@ def inventory_health(unit: str | None = Query(None, description="Filter to a spe
     except Exception as e:
         logger.error(f"inventory_health failed: {e}")
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+    
+
+@router.get("/ops/kpi_strip")
+def kpi_strip():
+    """
+    Powers the Operations page KPI strip (RIGHT NOW zone).
+
+    Combines two views:
+      - v_inventory_health_multi_uom: finished-goods buckets (sellable,
+        reserved, non_sellable, in_progress) at facilities 4510 + 4511,
+        item_category '% - Each'. Multi-UoM aware.
+      - v_pre_production_inventory: upstream bulk material at the processor
+        (4511) — biomass + concentrates + kief, all UoMs. Single summary row.
+
+    finished_goods is a list (one row per status_bucket).
+    pre_production is a single object (summary), or null if empty.
+    """
+    try:
+        finished_goods = query_view("v_inventory_health_multi_uom")
+        pre_production_rows = query_view("v_pre_production_inventory")
+        return {
+            "source": "bigquery",
+            "view": "v_inventory_health_multi_uom + v_pre_production_inventory",
+            "finished_goods": finished_goods,
+            "pre_production": pre_production_rows[0] if pre_production_rows else None,
+            "row_count": len(finished_goods)
+        }
+    except Exception as e:
+        logger.error(f"kpi_strip failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+@router.get("/ops/inventory_breakdown")
+def inventory_breakdown(
+    scope: str | None = Query(None, description="Filter by scope: finished_goods or pre_production"),
+    status_bucket: str | None = Query(None, description="Filter by status_bucket: sellable, reserved, non_sellable, in_progress, pre_production")
+):
+    """
+    Powers the KPI tile drill-down modal.
+
+    Returns un-aggregated rows from v_inventory_health_breakdown — one row per
+    (scope, status_bucket, canix_status, item_category, unit_of_measure,
+    facility_id). This is the detail behind each KPI number.
+
+    Filter with ?scope= and/or ?status_bucket= to drill into one tile.
+    """
+    try:
+        clauses = []
+        if scope:
+            clauses.append(f"scope = '{scope}'")
+        if status_bucket:
+            clauses.append(f"status_bucket = '{status_bucket}'")
+        where = " AND ".join(clauses) if clauses else None
+        order_by = "scope, status_bucket, canix_status, item_category, unit_of_measure"
+        rows = query_view("v_inventory_health_breakdown", where=where, order_by=order_by)
+        return {
+            "source": "bigquery",
+            "view": "v_inventory_health_breakdown",
+            "rows": rows,
+            "row_count": len(rows)
+        }
+    except Exception as e:
+        logger.error(f"inventory_breakdown failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
 
 @router.get("/ops/sellable_by_sku")
