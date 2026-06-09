@@ -164,87 +164,19 @@ def next_actions(
     limit: int = Query(50, description="Max rows to return")
 ):
     """
-    Returns prioritized list of items needing operator attention.
-
-    Combines signals from across the data:
-    - Errored runs (highest priority)
-    - Runs pending approval
-    - Compliance-overdue items (physically complete, not submitted in Canix)
-    - Stalled batches (days_on_current_run > 7)
-
-    Each row includes priority (1=highest, 4=lowest), batch_name, run_name,
-    status, age_hours since the issue arose, and a suggested action.
+    Per-active-batch next-action worklist. One row per active batch
+    (active-set = v_active_batches), showing the first non-SUBMITTED run and the
+    action it needs, prioritized 1=highest. Reads v_next_actions, which ports the
+    ops_model 6-rule classification to SQL. Replaces the prior 4-category
+    problems-only SQL.
     """
     try:
-        sql = f"""
-            WITH errored AS (
-                SELECT
-                    1 AS priority,
-                    b.name AS batch_name,
-                    r.name AS run_name,
-                    r.status,
-                    'Run errored — needs investigation' AS action,
-                    TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), r.updated_at, HOUR) AS age_hours,
-                    r.id AS run_id,
-                    r.manufacturing_batch_id AS batch_id
-                FROM `mfny-to-bigquery.canix_raw.bronze_manu_batch_runs` r
-                JOIN `mfny-to-bigquery.canix_raw.bronze_manu_batches` b
-                    ON r.manufacturing_batch_id = b.id
-                WHERE r.status = 'ERRORED'
-            ),
-            pending_approval AS (
-                SELECT
-                    2 AS priority,
-                    b.name AS batch_name,
-                    r.name AS run_name,
-                    r.status,
-                    'Pending approval — review and submit' AS action,
-                    TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), r.updated_at, HOUR) AS age_hours,
-                    r.id AS run_id,
-                    r.manufacturing_batch_id AS batch_id
-                FROM `mfny-to-bigquery.canix_raw.bronze_manu_batch_runs` r
-                JOIN `mfny-to-bigquery.canix_raw.bronze_manu_batches` b
-                    ON r.manufacturing_batch_id = b.id
-                WHERE r.status = 'SUBMITTED_FOR_APPROVAL'
-            ),
-            compliance_overdue AS (
-                SELECT
-                    3 AS priority,
-                    batch_name,
-                    run_name,
-                    run_status AS status,
-                    'Physically complete, not submitted in Canix' AS action,
-                    days_since_end * 24 AS age_hours,
-                    run_id,
-                    CAST(NULL AS STRING) AS batch_id
-                FROM `mfny-to-bigquery.canix_raw.v_compliance_timing`
-                WHERE compliance_risk IN ('OVERDUE', 'AT_RISK')
-            ),
-            stalled AS (
-                SELECT
-                    4 AS priority,
-                    batch_name,
-                    current_run_name AS run_name,
-                    current_run_status AS status,
-                    'Stalled — no progress in 7+ days' AS action,
-                    days_on_current_run * 24 AS age_hours,
-                    CAST(NULL AS STRING) AS run_id,
-                    batch_id
-                FROM `mfny-to-bigquery.canix_raw.v_active_production`
-                WHERE days_on_current_run >= 7
-                  AND current_run_status IN ('OPEN', 'PENDING_CONFIGURATION')
-            )
-            SELECT * FROM errored
-            UNION ALL SELECT * FROM pending_approval
-            UNION ALL SELECT * FROM compliance_overdue
-            UNION ALL SELECT * FROM stalled
-            ORDER BY priority ASC, age_hours DESC
-            LIMIT {limit}
-        """
-        rows = run_sql(sql)
+        rows = run_sql("SELECT * FROM `mfny-to-bigquery.canix_raw.v_next_actions`")
+        if limit:
+            rows = rows[:limit]
         return {
             "source": "bigquery",
-            "view": "synthesized from multiple views",
+            "view": "v_next_actions",
             "rows": rows,
             "row_count": len(rows)
         }

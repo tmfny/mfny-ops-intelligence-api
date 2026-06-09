@@ -683,12 +683,6 @@ def stalled_batches():
     model = get_cached_model(runs, batches)
     return find_stalled_batches(model)
 
-@router.get("/ops/next_actions")
-def next_actions():
-
-    runs, batches, batch_map = load_runs_batches()
-
-    return get_next_actions(runs, batch_map)
 
 @router.get("/ops/throughput")
 def throughput():
