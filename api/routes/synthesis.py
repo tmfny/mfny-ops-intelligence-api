@@ -87,7 +87,34 @@ SNAPSHOT_VIEWS = [
     "v_active_batches",
     "v_next_actions",
     "v_expiring_skus",
+    "v_executive_flow",
+    "v_executive_production_summary",
+    "v_executive_inventory_summary",
+    "v_sales_status_strip",
+    "v_inventory_valuation_summary",
 ]
+
+
+# ---------------------------------------------------------------------------
+# DATA TRUST DECLARATIONS
+# Single source of truth for what the exec tool can and cannot stand behind.
+# Every view/field added to the snapshot MUST be vetted here before shipping.
+# The prompt is given these notes so Claude never confidently reports data we
+# know is unreliable, and describes ambiguous fields precisely.
+# ---------------------------------------------------------------------------
+DATA_TRUST_NOTES = (
+    "DATA RELIABILITY NOTES (respect these strictly):\n"
+    "- Payment/collection data is NOT tracked reliably in this system "
+    "(MFNY uses QuickBooks for money owed, not this data source). NEVER report "
+    "amounts paid, collected, or outstanding. You may report order REVENUE and "
+    "order VALUE, which are reliable.\n"
+    "- 'Sellable inventory' counts (sales_summary) are packages available to sell "
+    "at the distribution facility specifically. 'Inventory valuation' counts cover "
+    "the valued inventory set, a different population. If both appear, describe what "
+    "each refers to rather than treating them as the same number.\n"
+    "- Inventory values are on a standard wholesale-price basis ('book value'), "
+    "not market or realized value.\n"
+)
 
 
 async def fetch_snapshot() -> dict[str, list[dict]]:
@@ -127,41 +154,16 @@ def compress_snapshot(snapshot: dict[str, list[dict]]) -> dict:
     """
     Shape the full snapshot into a lean payload for the LLM prompt.
 
-    fetch_snapshot() returns everything (full truth, kept for /ops/snapshot
-    diagnostics). This compresses it to what an exec answer actually needs —
-    collapsing the heaviest views to summaries, sending the risk/worklist
-    views in full. Target: ~14k tokens -> ~3k.
+    Operational multi-row views get compressed (top-N / summarized).
+    Executive views are already single-row pre-aggregates — sent whole, no compression.
     """
-    def _f(v):
-        # completion_pct comes back as a STRING ("25.0") in the JSON, not a
-        # float — cast safely, default 0.0 on anything unparseable.
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return 0.0
-
-    active = snapshot.get("v_active_batches", [])
-    # Summarize the 42-row active-batches view down to counts + averages.
-    # batch_health here is a LIFECYCLE state (PENDING_START / IN_PROGRESS),
-    # not a quality flag — so we report the lifecycle breakdown, not "at risk".
-    from collections import Counter
-    lifecycle = Counter(b.get("batch_health") for b in active)
-    completions = [_f(b.get("completion_pct")) for b in active]
-    avg_completion = round(sum(completions) / len(completions), 1) if completions else 0.0
-
-    active_summary = {
-        "total_active_batches": len(active),
-        "by_lifecycle_state": dict(lifecycle),
-        "avg_completion_pct": avg_completion,
-    }
-
-    # v_next_actions is priority-ordered — send the top 10, drop the low-priority tail.
+    # v_next_actions is priority-ordered — top 10 only.
     next_actions = sorted(
         snapshot.get("v_next_actions", []),
         key=lambda r: r.get("priority", 999)
     )[:10]
 
-    # v_bottleneck_summary — keep all rows, trim to the columns that carry meaning.
+    # v_bottleneck_summary — all rows, trimmed to meaningful columns.
     bottleneck_cols = ["step_name", "batches_waiting", "avg_days_waiting",
                        "max_days_waiting", "batches_over_7_days"]
     bottlenecks = [
@@ -169,19 +171,28 @@ def compress_snapshot(snapshot: dict[str, list[dict]]) -> dict:
         for r in snapshot.get("v_bottleneck_summary", [])
     ]
 
+    # Executive views are single-row aggregates — unwrap the list to the one row
+    # for a cleaner prompt (or empty dict if the view returned nothing).
+    def _one(view):
+        rows = snapshot.get(view, [])
+        return rows[0] if rows else {}
+
     return {
-        # Full — the curated risk signal, small and central.
+        # --- Operational: what needs attention right now ---
         "system_alerts": snapshot.get("v_system_alerts", []),
-        # Top 10 by priority.
         "next_actions": next_actions,
-        # All rows, trimmed columns.
         "bottlenecks": bottlenecks,
-        # Full — tiny.
         "material_pressure": snapshot.get("v_material_pressure", []),
-        # Full — already trimmed to non-OK.
         "expiring_skus": snapshot.get("v_expiring_skus", []),
-        # Summary only — the big token win.
-        "active_batches_summary": active_summary,
+        # --- Executive: overall status, money, trends (pre-summarized) ---
+        "pipeline_flow": _one("v_executive_flow"),
+        "production_trends": _one("v_executive_production_summary"),
+        "inventory_summary": _one("v_executive_inventory_summary"),
+        # sales_summary: drop mtd_paid — Canix payment data is unreliable (money
+        # owed lives in QuickBooks, not here). Revenue/order values are kept.
+        "sales_summary": {k: v for k, v in _one("v_sales_status_strip").items()
+                          if k != "mtd_paid"},
+        "inventory_valuation": _one("v_inventory_valuation_summary"),
     }
 
 
@@ -214,15 +225,15 @@ class AskRequest(BaseModel):
 
 
 def build_system_prompt(snapshot: dict) -> str:
-    """
-    Frame Claude as an ops analyst briefing executives, and hand it the live
-    snapshot as ground truth. The snapshot is injected as compact JSON — Claude
-    answers ONLY from it, never invents figures.
-    """
     return (
         "You are the operations analyst for MFNY, a licensed cannabis processor. "
         "You brief executives — the CFO and operations leads — who want fast, clear, "
-        "accurate readouts of what is happening in production right now.\n\n"
+        "accurate readouts of the business right now.\n\n"
+        "The snapshot below covers: current production status, bottlenecks, stalled "
+        "batches, material in the pipeline, items needing attention, expiring product, "
+        "the farm-to-product flow, month-over-month production trends, inventory levels "
+        "and days-of-inventory, sales and revenue (month-to-date), and inventory "
+        "valuation.\n\n"
         "RULES:\n"
         "- Answer ONLY from the LIVE OPERATIONS SNAPSHOT below. Never invent or estimate "
         "numbers not present in it. If the snapshot doesn't contain the answer, say so plainly.\n"
@@ -230,11 +241,13 @@ def build_system_prompt(snapshot: dict) -> str:
         "the point from the first line alone. Most answers should be 2-4 sentences.\n"
         "- Write in plain prose, not markdown. NO bold, NO headers, NO bullet-point lists unless "
         "the answer is genuinely a list of items — and even then keep it tight.\n"
-        "- Use plain business language, not database or SQL terms. Say 'batches waiting at "
-        "final packout', not 'rows in v_bottleneck_summary'.\n"
+        "- Use plain business language, not database or SQL terms.\n"
+        "- For inventory value, refer to it as 'book value' (it is valued on a standard price "
+        "basis). Report dollar figures clearly (e.g. $4.5M).\n"
         "- Name risks as risks (compliance, stalled batches, expiring product) and say why they "
         "matter in a few words — don't pad with action plans unless asked.\n\n"
-        "LIVE OPERATIONS SNAPSHOT (current as of this request):\n"
+        f"{DATA_TRUST_NOTES}\n"
+        "LIVE OPERATIONS SNAPSHOT (current as of the most recent data sync):\n"
         f"{json.dumps(snapshot, separators=(',', ':'))}"
     )
 
