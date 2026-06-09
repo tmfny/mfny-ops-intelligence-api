@@ -12,6 +12,15 @@ import logging
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Allowed batch_health values — must match v_active_batches' CASE output exactly.
+# Validated because `health` is f-string interpolated into the WHERE clause.
+_BATCH_HEALTH = {
+    "NEEDS_ATTENTION",
+    "PENDING_APPROVAL",
+    "IN_PROGRESS",
+    "PENDING_START",
+    "UNKNOWN",
+}
 
 @router.get("/ops/active_production")
 def active_production(
@@ -20,18 +29,24 @@ def active_production(
     """
     Returns currently-active manufacturing batches with run progress.
 
-    Each row represents a batch with end_date IS NULL (still active),
-    showing total/completed/open/pending/errored run counts and a
-    computed batch_health classification.
+    Active-set = v_active_batches (real template + at least one non-SUBMITTED
+    run + updated within 90 days). Replaces the prior `end_date IS NULL`
+    definition, which was semantically wrong (end_date is a scheduling field,
+    not a done-marker) and over-counted active batches ~2x with zombies/completed.
 
     Sorted by health priority (NEEDS_ATTENTION first), then by days_on_current_run.
     """
+    if health and health not in _BATCH_HEALTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid health. Must be one of: {sorted(_BATCH_HEALTH)}"
+        )  
     try:
         where = f"batch_health = '{health}'" if health else None
-        rows = query_view("v_active_production", where=where)
+        rows = query_view("v_active_batches", where=where)
         return {
             "source": "bigquery",
-            "view": "v_active_production",
+            "view": "v_active_batches",
             "rows": rows,
             "row_count": len(rows)
         }
@@ -94,12 +109,12 @@ def stalled_batches(min_days: int = Query(7, description="Minimum days_on_curren
     A batch is "stalled" if its current run has been in OPEN, ERRORED, or
     PENDING_CONFIGURATION status for >= min_days (default 7).
 
-    Built from v_active_production with a days_on_current_run filter.
+    Built from v_active_batches with a days_on_current_run filter.
     """
     try:
         sql = f"""
             SELECT *
-            FROM `mfny-to-bigquery.canix_raw.v_active_production`
+            FROM `mfny-to-bigquery.canix_raw.v_active_batches`
             WHERE days_on_current_run >= {min_days}
               AND current_run_status IN ('OPEN', 'ERRORED', 'PENDING_CONFIGURATION')
             ORDER BY days_on_current_run DESC
@@ -107,7 +122,7 @@ def stalled_batches(min_days: int = Query(7, description="Minimum days_on_curren
         rows = run_sql(sql)
         return {
             "source": "bigquery",
-            "view": "v_active_production (filtered)",
+            "view": "v_active_batches (filtered)",
             "filter": f"days_on_current_run >= {min_days}",
             "rows": rows,
             "row_count": len(rows)
