@@ -104,6 +104,108 @@ def inventory_breakdown(
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
 
+@router.get("/ops/batch_runs")
+def batch_runs(
+    batch_id: str = Query(..., description="manufacturing_batch_id to fetch the run timeline for")
+):
+    """
+    Returns the full run-by-run timeline for a single batch, ordered by run_order.
+    Powers the stalled-batch detail modal on the Operations page (System Alerts).
+    Reads v_batch_run_timeline filtered to one batch. batch_id is the value carried
+    in v_system_alerts.reference_id for stalled_batches alerts.
+    """
+    if not batch_id.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid batch_id — must be a numeric manufacturing_batch_id."
+        )
+    try:
+        where = f"manufacturing_batch_id = '{batch_id}'"
+        rows = query_view("v_batch_run_timeline", where=where, order_by="run_order")
+        return {
+            "source": "bigquery",
+            "view": "v_batch_run_timeline",
+            "rows": rows,
+            "row_count": len(rows)
+        }
+    except Exception as e:
+        logger.error(f"batch_runs failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+@router.get("/ops/active_batches")
+def active_batches():
+    """
+    Returns all currently-active production batches (batch grain, one row per batch).
+    Powers the Active Production panel + the Active Runs/Active Production count on
+    the Operations page.
+
+    "Active" = real template + at least one non-SUBMITTED run + batch updated within
+    90 days. This replaces the prior `end_date IS NULL` definition, which was
+    semantically wrong (end_date is a scheduling field, not a done-marker) and
+    undercounted active production badly. See v_active_batches.
+
+    Known residuals (logged for later, exact Canix-status parity deferred):
+    - May include a few recent single-run BHO extractions / never-started batches
+      that Canix's live UI classifies as done/not-started.
+    - May miss a batch whose runs are all SUBMITTED but Canix still shows active.
+    """
+    try:
+        rows = query_view("v_active_batches")
+        return {
+            "source": "bigquery",
+            "view": "v_active_batches",
+            "rows": rows,
+            "row_count": len(rows)
+        }
+    except Exception as e:
+        logger.error(f"active_batches failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+# Allowed bucket_ids — must match v_material_pressure_packages.bucket_id exactly.
+# Validated because the WHERE clause is f-string interpolated (codebase pattern),
+# so an unchecked param would be an injection surface. Enum check closes that.
+_MATERIAL_PRESSURE_BUCKETS = {
+    "fresh_frozen_awaiting_extraction",
+    "cured_flower_awaiting_production",
+    "extracted_awaiting_decarb",
+    "concentrate_ready_for_production",
+}
+
+@router.get("/ops/material_pressure_packages")
+def material_pressure_packages(
+    bucket_id: str = Query(..., description="Which material-pressure bucket to list packages for. One of the 4 v_material_pressure bucket_ids.")
+):
+    """
+    Returns package-level detail for one Material Pressure bucket (package grain,
+    one row per package). Powers the Material Pressure drill-down modal on the
+    Operations page. bucket_id is the value carried in v_material_pressure.bucket_id.
+
+    Each row: tag (METRC), item_name, strain_name, weight (native unit, FLOAT64),
+    unit_of_measure, location_name, source_batch_id, packaged_date, days_old.
+    Aggregated up by bucket_id, this reproduces v_material_pressure's counts/weights
+    by construction (shared base filter + CASE). Ordered oldest-first.
+    """
+    if bucket_id not in _MATERIAL_PRESSURE_BUCKETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid bucket_id. Must be one of: {sorted(_MATERIAL_PRESSURE_BUCKETS)}"
+        )
+    try:
+        where = f"bucket_id = '{bucket_id}'"
+        rows = query_view("v_material_pressure_packages", where=where, order_by="days_old DESC")
+        return {
+            "source": "bigquery",
+            "view": "v_material_pressure_packages",
+            "rows": rows,
+            "row_count": len(rows)
+        }
+    except Exception as e:
+        logger.error(f"material_pressure_packages failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
 @router.get("/ops/sellable_by_sku")
 def sellable_by_sku(
     category: str | None = Query(None, description="Filter to a specific item_category"),
