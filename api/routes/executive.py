@@ -12,6 +12,56 @@ from fastapi import APIRouter, HTTPException
 from api.bq_client import query_view
 import logging
 
+from datetime import date, datetime, timedelta
+
+
+def _to_date(v):
+    """BigQuery may hand back a date as a date object or an ISO string. Normalize."""
+    if v is None:
+        return None
+    if isinstance(v, date) and not isinstance(v, datetime):
+        return v
+    if isinstance(v, datetime):
+        return v.date()
+    try:
+        return datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _month(v):
+    """Format a date field as 'May 2026'. Returns '' if unparseable."""
+    d = _to_date(v)
+    return d.strftime("%B %Y") if d else ""
+
+
+def _prior_month_name(v):
+    """Month name of the month before the given date, e.g. 'April'. No view change needed."""
+    d = _to_date(v)
+    if not d:
+        return ""
+    # first of this month, minus one day, lands in the prior month
+    first = d.replace(day=1)
+    prior = first - timedelta(days=1)
+    return prior.strftime("%B")
+
+
+def _pct(v):
+    """A SAFE_DIVIDE ratio (e.g. -0.131) as a whole-number percent string '13'. '' if None."""
+    if v is None:
+        return ""
+    return f"{abs(round(float(v) * 100))}"
+
+
+def _commas(v):
+    """Integer-ish value with thousands separators. '' if None."""
+    if v is None:
+        return ""
+    try:
+        return f"{int(round(float(v))):,}"
+    except (ValueError, TypeError):
+        return ""
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -61,12 +111,34 @@ def executive_throughput():
         # Summary view returns exactly one row; surface as a single object.
         summary = summary_rows[0] if summary_rows else None
 
+        caption = None
+        if summary:
+            month = _month(summary.get("last_month_date"))
+            prior = _prior_month_name(summary.get("last_month_date"))
+            runs = summary.get("last_month_runs")
+            pct = summary.get("last_month_pct_change")
+            direction = "up" if (pct or 0) >= 0 else "down"
+            avg = summary.get("trailing_3mo_avg")
+            peak = summary.get("peak_runs")
+            peak_month = _month(summary.get("peak_month_date"))
+            pct_of_peak = _pct(summary.get("last_month_pct_of_peak"))
+
+            caption = (
+                f"{month} completed {_commas(runs)} production runs, "
+                f"{direction} {_pct(pct)}% from {prior}. "
+                f"The trailing three-month average is {_commas(avg)} runs per month "
+                f"— {pct_of_peak}% of the all-time peak of {_commas(peak)} runs in {peak_month}. "
+                f"Production dipped Aug\u2013Dec 2025 during a four-month migration to METRC "
+                f"compliance tracking; volumes have since recovered toward prior peaks."
+            )
+
         return {
             "source": "bigquery",
             "view": "v_executive_production_throughput + v_executive_production_summary",
             "chart_rows": chart_rows,
             "chart_row_count": len(chart_rows),
-            "summary": summary
+            "summary": summary,
+            "caption": caption
         }
     except Exception as e:
         logger.error(f"executive_throughput failed: {e}")
@@ -95,12 +167,24 @@ def executive_inventory():
 
         summary = summary_rows[0] if summary_rows else None
 
+        caption = None
+        if summary:
+            sellable = summary.get("sellable_now")
+            shipped = summary.get("cumulative_shipped")
+            cats = len(chart_rows) if chart_rows else 0
+            caption = (
+                f"{_commas(sellable)} packages are sellable-ready across "
+                f"{cats} product categories. {_commas(shipped)} packages have shipped "
+                f"cumulatively from distribution."
+            )
+
         return {
             "source": "bigquery",
             "view": "v_executive_inventory_health + v_executive_inventory_summary",
             "chart_rows": chart_rows,
             "chart_row_count": len(chart_rows),
-            "summary": summary
+            "summary": summary,
+            "caption": caption
         }
     except Exception as e:
         logger.error(f"executive_inventory failed: {e}")
@@ -128,12 +212,26 @@ def executive_biomass():
 
         summary = summary_rows[0] if summary_rows else None
 
+        caption = None
+        if summary:
+            total = summary.get("total_biomass_lbs")
+            strains = summary.get("distinct_strains")
+            pkgs = summary.get("total_packages")
+            top_name = summary.get("top_strain_name")
+            top_lbs = summary.get("top_strain_lbs")
+            caption = (
+                f"{_commas(total)} lbs of biomass on hand across {strains} strains "
+                f"and {_commas(pkgs)} packages. The largest holding is {top_name} "
+                f"at {_commas(top_lbs)} lbs."
+            )
+
         return {
             "source": "bigquery",
             "view": "v_executive_biomass_health + v_executive_biomass_summary",
             "chart_rows": chart_rows,
             "chart_row_count": len(chart_rows),
-            "summary": summary
+            "summary": summary,
+            "caption": caption
         }
     except Exception as e:
         logger.error(f"executive_biomass failed: {e}")
